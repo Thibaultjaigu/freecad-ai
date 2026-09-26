@@ -930,10 +930,20 @@ def save_config(config: AppConfig):
 # Indices stored in the param store correspond to the order of items in
 # resources/panels/FreeCADAIPrefs.ui — keep these lists in sync.
 
+#
+# _PARAM_PROVIDERS must equal PROVIDERS (the Settings dialog's list), order
+# included. It used to be a 12-provider subset, and a profile on any of the
+# other ten was switched to "anthropic" by the next OK in Edit → Preferences:
+# the combo can't show the provider, so it shows its first item and writes
+# that back (#97). Append only -- the stored ProviderIndex is positional.
+
 _PARAM_PROVIDERS = [
     "anthropic", "openai", "ollama", "gemini", "openrouter",
     "moonshot", "deepseek", "qwen", "groq", "mistral", "together",
     "cloudflare-workers-ai",
+    # added in #97
+    "fireworks", "xai", "cohere", "sambanova", "minimax", "llama",
+    "github", "huggingface", "zhipu", "custom",
 ]
 _PARAM_MODES = ["plan", "act"]
 _PARAM_THINKING = ["off", "on", "extended"]
@@ -996,9 +1006,10 @@ def _write_to_param_store(cfg: AppConfig) -> None:
     if cfg.provider.name in _PARAM_PROVIDERS:
         group.SetInt("ProviderIndex", _PARAM_PROVIDERS.index(cfg.provider.name))
     else:
-        # Provider isn't representable in the prefs combo (e.g. "custom",
-        # "github", "huggingface", "zhipu"). Clear any stale index left
-        # over from a previous prefs-page interaction so the load path
+        # Provider isn't representable in the prefs combo. Since #97 every
+        # preset is, so this only catches names that aren't presets (a
+        # config from a newer version, a hand edit). Clear any stale index
+        # left over from a previous prefs-page interaction so the load path
         # doesn't shadow the JSON name with a wrong provider. See #12.
         try:
             group.RemInt("ProviderIndex")

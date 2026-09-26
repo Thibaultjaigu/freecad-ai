@@ -559,8 +559,11 @@ class TestParamStoreBridge:
         assert cfg_in.max_tokens == 16384
         assert cfg_in.enable_tools is False
 
-    def test_write_clears_stale_provider_index_for_custom(self):
+    def test_write_clears_stale_provider_index_for_unknown_provider(self):
         """Issue #12: saving a non-prefs provider must clear ProviderIndex.
+
+        Since #97 every preset is in the prefs combo, so the only names
+        left that it cannot show are ones that are not presets at all.
 
         Scenario: user previously had anthropic (ProviderIndex=0 in the
         param store), then switched to "custom" via the main Settings
@@ -579,7 +582,7 @@ class TestParamStoreBridge:
         )
 
         cfg_out = AppConfig()
-        cfg_out.provider.name = "custom"
+        cfg_out.provider.name = "no-such-provider"  # e.g. from a newer version
         cfg_out.provider.model = "my-local-model"
         cfg_out.provider.base_url = "http://gateway.example/v1"
         cfg_out.provider.api_key = "secret"
@@ -594,50 +597,69 @@ class TestParamStoreBridge:
         assert strings["BaseUrl"] == "http://gateway.example/v1"
 
         # Round-trip: applying overrides onto a fresh cfg loaded from JSON
-        # must keep "custom" — the absent ProviderIndex means no override.
+        # must keep the name — the absent ProviderIndex means no override.
         cfg_in = AppConfig()
-        cfg_in.provider.name = "custom"  # as it would be after JSON load
+        cfg_in.provider.name = "no-such-provider"  # as it would be after JSON load
         cfg_in.provider.model = "my-local-model"
         cfg_in.provider.base_url = "http://gateway.example/v1"
         with patch("freecad_ai.config._get_param_group", return_value=group):
             _apply_param_store_overrides(cfg_in)
 
-        assert cfg_in.provider.name == "custom"
+        assert cfg_in.provider.name == "no-such-provider"
         assert cfg_in.provider.model == "my-local-model"
         assert cfg_in.provider.base_url == "http://gateway.example/v1"
 
-    def test_write_clears_stale_provider_index_for_all_non_prefs_providers(self):
-        """Same guarantee for github/huggingface/zhipu — any provider in
-        PROVIDERS but not in the prefs combo must clear the stale index.
+    def test_every_settings_dialog_provider_survives_the_prefs_page(self):
+        """Issue #97: the prefs combo writes its current index back on every
+        OK in Edit → Preferences, whether or not the user touched it. So
+        every provider the Settings dialog offers must get a ProviderIndex
+        that maps back to itself -- a missing one leaves the combo on
+        "anthropic", and that is what gets written into the profile.
         """
         from freecad_ai.config import (
             AppConfig, _PARAM_PROVIDERS, _write_to_param_store,
         )
-        from freecad_ai.llm.providers import PROVIDERS
+        from freecad_ai.llm.providers import get_provider_names
         from unittest.mock import patch
 
-        non_prefs = [n for n in PROVIDERS if n not in _PARAM_PROVIDERS]
-        assert non_prefs, "expected at least one provider absent from prefs combo"
-
-        for name in non_prefs:
-            group, ints, _, _ = self._fake_param_group(ints={"ProviderIndex": 0})
+        for name in get_provider_names():
+            group, ints, _, _ = self._fake_param_group()
             cfg = AppConfig()
             cfg.provider.name = name
             with patch("freecad_ai.config._get_param_group", return_value=group):
                 _write_to_param_store(cfg)
-            assert "ProviderIndex" not in ints, (
-                f"writing provider={name!r} must clear stale ProviderIndex")
+            assert "ProviderIndex" in ints, (
+                f"provider={name!r} has no entry in the prefs combo")
+            assert _PARAM_PROVIDERS[ints["ProviderIndex"]] == name
 
-    def test_param_providers_subset_of_real_providers(self):
-        """Guard against drift: every name in _PARAM_PROVIDERS must exist
-        in the real PROVIDERS registry. If we drop a provider from
-        providers.py without trimming this list, the prefs combo would
-        offer a phantom choice.
+    def test_prefs_combo_and_settings_dialog_list_the_same_providers(self):
+        """#97: the two provider lists are one list. PROVIDERS order is what
+        the Settings dialog shows; _PARAM_PROVIDERS and the .ui items are
+        what the prefs page shows and what ProviderIndex points into.
+        A new provider goes at the END of all three.
         """
+        import xml.etree.ElementTree as ET
         from freecad_ai.config import _PARAM_PROVIDERS
         from freecad_ai.llm.providers import PROVIDERS
-        missing = [n for n in _PARAM_PROVIDERS if n not in PROVIDERS]
-        assert not missing, f"_PARAM_PROVIDERS lists unknown providers: {missing}"
+        ui = os.path.join(os.path.dirname(__file__), "..", "..",
+                          "resources", "panels", "FreeCADAIPrefs.ui")
+        combo = next(w for w in ET.parse(ui).iter("widget")
+                     if w.get("name") == "providerCombo")
+        ui_items = [i.find("property/string").text for i in combo.findall("item")]
+        assert list(PROVIDERS) == _PARAM_PROVIDERS == ui_items
+
+    def test_stored_provider_indices_keep_their_meaning(self):
+        """ProviderIndex is positional and already sits in users' param
+        stores. These twelve positions shipped before #97 and must never
+        move -- reorder them and every stored index points at the wrong
+        provider.
+        """
+        from freecad_ai.config import _PARAM_PROVIDERS
+        assert _PARAM_PROVIDERS[:12] == [
+            "anthropic", "openai", "ollama", "gemini", "openrouter",
+            "moonshot", "deepseek", "qwen", "groq", "mistral", "together",
+            "cloudflare-workers-ai",
+        ]
 
 
 class TestConfigDirResolution:

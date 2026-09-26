@@ -30,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   file was found in; previously a single base directory was computed for the
   whole load, which in merge mode would hand every file the same neighbour.
 
+### Fixed
+
+- **Clicking OK in Edit → Preferences no longer switches your connection
+  profile to Anthropic (#97).** The provider combo on the preferences page
+  listed 12 of the 22 providers the Settings dialog offers. With a profile on
+  one of the other ten — Fireworks, xAI, Cohere, SambaNova, MiniMax, Llama,
+  GitHub Models, HuggingFace, Zhipu or Custom — the combo fell back to its
+  first entry, and FreeCAD writes every preferences page back on OK, including
+  pages you never opened. The profile came back as `anthropic` with its own
+  model, Base URL and key still attached: #12's symptom, by a path #12's fix
+  did not cover. Both lists now hold every provider, in the same order.
+  Existing preference values keep their meaning; the ten providers were
+  appended, and Cloudflare Workers AI moved down in the Settings dialog to
+  match.
+
 ## [0.30.0-alpha] - 2026-09-23
 
 ### Fixed

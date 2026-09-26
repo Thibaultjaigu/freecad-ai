@@ -6,6 +6,10 @@ OpenAI-compatible /chat/completions endpoints), and whether it
 supports native tool calling.
 """
 
+# Order matters: it is the Settings dialog's provider list, and it must
+# equal config._PARAM_PROVIDERS and the combo in FreeCADAIPrefs.ui, whose
+# positions are stored in users' param stores (#97). New providers go at
+# the end, never in the middle.
 PROVIDERS = {
     "anthropic": {
         "base_url": "https://api.anthropic.com",
@@ -34,20 +38,6 @@ PROVIDERS = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "default_model": "anthropic/claude-sonnet-4-6",
-        "api_style": "openai",
-        "supports_tools": True,
-    },
-    "cloudflare-workers-ai": {
-        # Cloudflare Workers AI exposes an OpenAI-compatible chat-completions
-        # endpoint per account. Users must replace {ACCOUNT_ID} with their
-        # Cloudflare account ID and supply a Workers AI API token as ApiKey.
-        # The Settings dialog warns at save time if the marker is still in
-        # place (_profiles_with_url_placeholder); nothing substitutes it.
-        "base_url": "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1",
-        # Tool calling is verified on this model. supports_tools is the only
-        # source of truth for non-Ollama providers, so the default must be a
-        # model that honours the tools parameter.
-        "default_model": "@cf/moonshotai/kimi-k2.7-code",
         "api_style": "openai",
         "supports_tools": True,
     },
@@ -91,6 +81,20 @@ PROVIDERS = {
     "together": {
         "base_url": "https://api.together.xyz/v1",
         "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "api_style": "openai",
+        "supports_tools": True,
+    },
+    "cloudflare-workers-ai": {
+        # Cloudflare Workers AI exposes an OpenAI-compatible chat-completions
+        # endpoint per account. Users must replace {ACCOUNT_ID} with their
+        # Cloudflare account ID and supply a Workers AI API token as ApiKey.
+        # The Settings dialog warns at save time if the marker is still in
+        # place (_profiles_with_url_placeholder); nothing substitutes it.
+        "base_url": "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1",
+        # Tool calling is verified on this model. supports_tools is the only
+        # source of truth for non-Ollama providers, so the default must be a
+        # model that honours the tools parameter.
+        "default_model": "@cf/moonshotai/kimi-k2.7-code",
         "api_style": "openai",
         "supports_tools": True,
     },
