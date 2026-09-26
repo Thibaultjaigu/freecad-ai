@@ -351,17 +351,16 @@ try:
 except Exception:
     pass
 
-# Register the FreeCAD AI preferences page in Edit → Preferences. The
-# Gui::Pref* widgets in the form auto-save to BaseApp/Preferences/Mod/FreeCADAI;
-# our config layer mirrors values from there into ~/.config/FreeCAD/FreeCADAI/config.json
-# on load so both this page and the workbench's Settings dialog stay in sync.
+# Register the FreeCAD AI page in Edit → Preferences: a Python page class
+# embedding the Settings dialog's own provider sections, writing
+# config.json directly (#99).
 try:
-    from freecad_ai.paths import get_prefs_ui_path as _gpup
-    _prefs_ui = _gpup()
-    if _prefs_ui:
-        Gui.addPreferencePage(_prefs_ui, "FreeCAD AI")
-except Exception:
-    pass
+    from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage as _PrefsPage
+    Gui.addPreferencePage(_PrefsPage, "FreeCAD AI")
+except Exception as _e:
+    import FreeCAD as _App
+    _App.Console.PrintWarning(
+        f"FreeCAD AI: preferences page not registered: {_e}\n")
 
 # Seed the FreeCAD parameter store from JSON so the preferences page shows
 # current values even when the user goes straight to Edit → Preferences

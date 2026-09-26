@@ -632,22 +632,6 @@ class TestParamStoreBridge:
                 f"provider={name!r} has no entry in the prefs combo")
             assert _PARAM_PROVIDERS[ints["ProviderIndex"]] == name
 
-    def test_prefs_combo_and_settings_dialog_list_the_same_providers(self):
-        """#97: the two provider lists are one list. PROVIDERS order is what
-        the Settings dialog shows; _PARAM_PROVIDERS and the .ui items are
-        what the prefs page shows and what ProviderIndex points into.
-        A new provider goes at the END of all three.
-        """
-        import xml.etree.ElementTree as ET
-        from freecad_ai.config import _PARAM_PROVIDERS
-        from freecad_ai.llm.providers import PROVIDERS
-        ui = os.path.join(os.path.dirname(__file__), "..", "..",
-                          "resources", "panels", "FreeCADAIPrefs.ui")
-        combo = next(w for w in ET.parse(ui).iter("widget")
-                     if w.get("name") == "providerCombo")
-        ui_items = [i.find("property/string").text for i in combo.findall("item")]
-        assert list(PROVIDERS) == _PARAM_PROVIDERS == ui_items
-
     def test_stored_provider_indices_keep_their_meaning(self):
         """ProviderIndex is positional and already sits in users' param
         stores. These twelve positions shipped before #97 and must never
