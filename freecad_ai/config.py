@@ -696,8 +696,9 @@ class AppConfig:
 
         Every ``cfg.provider.*`` read and write in the codebase means "the
         active chat connection", so they all keep working through here.
-        Reads AND writes: the FreeCAD parameter-store bridge assigns to
-        ``cfg.provider.model`` etc., and those land in the stored profile.
+        Reads AND writes: the one-time parameter-store migration (#99)
+        assigns to ``cfg.provider.model`` etc., and those land in the
+        stored profile.
         """
         self._ensure_profile()
         return self.profiles[self.active_profile]
@@ -871,17 +872,25 @@ def load_config() -> AppConfig:
     """
     _ensure_dirs()
     cfg = AppConfig()
+    config_loaded_ok = True
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
             cfg = AppConfig.from_dict(data)
         except (json.JSONDecodeError, TypeError, KeyError):
-            pass
+            # A broken-but-repairable config.json falls back to bare
+            # defaults here, same as always. But migrating on top of that
+            # and saving would replace the broken file with defaults --
+            # destroying whatever the user could otherwise have fixed.
+            # Skip the migration; the param-store group stays untouched,
+            # so it is retried once the file is readable again.
+            config_loaded_ok = False
     # (The pre-namespace rerank_params seeding that used to live here now
     # runs inside _migrate_flat_provider, where the profile that actually
     # reads those params is built. rerank_params itself is legacy.)
-    _migrate_param_store(cfg)
+    if config_loaded_ok:
+        _migrate_param_store(cfg)
     return cfg
 
 
@@ -943,11 +952,19 @@ def _get_param_group():
 
 
 def _remove_param_group() -> None:
-    """Delete Mod/FreeCADAI from FreeCAD's user.cfg — the API key with it."""
+    """Delete Mod/FreeCADAI from FreeCAD's parameters, and save user.cfg.
+
+    RemGroup only edits the in-memory parameter tree -- FreeCAD normally
+    writes user.cfg at clean exit, so without the explicit save the API
+    key would stay on disk (and, on a crash before exit, get re-applied
+    by the migration on the next start). saveParameter() persists the
+    removal to user.cfg immediately, so the key leaves disk now.
+    """
     try:
         import FreeCAD
         FreeCAD.ParamGet(
             "User parameter:BaseApp/Preferences/Mod").RemGroup("FreeCADAI")
+        FreeCAD.saveParameter()
     except (ImportError, RuntimeError, AttributeError):
         pass
 

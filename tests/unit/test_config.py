@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -398,7 +399,7 @@ class TestParamStoreMigration:
     def test_every_field_is_applied_saved_and_the_group_removed(
             self, tmp_config_dir, monkeypatch):
         group = self._group(
-            ints={"ProviderIndex": 2, "ModeIndex": 0, "ThinkingIndex": 1,
+            ints={"ProviderIndex": 2, "ModeIndex": 1, "ThinkingIndex": 1,
                   "MaxTokens": 9000},
             strings={"Model": "qwen3:8b", "BaseUrl": "http://h:11434/v1",
                      "ApiKey": "sk-x"},
@@ -408,7 +409,7 @@ class TestParamStoreMigration:
         assert (cfg.provider.name, cfg.provider.model) == ("ollama", "qwen3:8b")
         assert cfg.provider.base_url == "http://h:11434/v1"
         assert cfg.provider.api_key == "sk-x"
-        assert (cfg.mode, cfg.thinking) == ("plan", "on")
+        assert (cfg.mode, cfg.thinking) == ("act", "on")
         assert (cfg.max_tokens, cfg.enable_tools) == (9000, False)
         with open(config_mod.CONFIG_FILE) as f:
             assert "qwen3:8b" in f.read()
@@ -464,6 +465,20 @@ class TestParamStoreMigration:
         assert removed == []
         assert "No space left" in caplog.text
 
+    def test_an_unparseable_config_file_is_left_untouched(
+            self, tmp_config_dir, monkeypatch):
+        """The migration must not replace a broken-but-repairable
+        config.json with defaults -- skip it, and keep the group so it
+        retries once the file is fixed."""
+        with open(config_mod.CONFIG_FILE, "w") as f:
+            f.write('{"mode": "act", "max_tokens": 16000,,}')
+        before = open(config_mod.CONFIG_FILE, "rb").read()
+        removed = self._run(monkeypatch, self._group(strings={"Model": "m"}))
+        config_mod.load_config()
+        with open(config_mod.CONFIG_FILE, "rb") as f:
+            assert f.read() == before
+        assert removed == []
+
     def test_outside_freecad_nothing_happens(self, tmp_config_dir):
         config_mod.load_config()          # _get_param_group() returns None
         assert not os.path.exists(config_mod.CONFIG_FILE)
@@ -474,6 +489,27 @@ class TestParamStoreMigration:
         monkeypatch.setattr(config_mod, "_get_param_group", lambda: group)
         config_mod.save_config(config_mod.AppConfig())
         assert self._stores == ({}, {}, {})
+
+    def test_remove_param_group_persists_user_cfg(self, monkeypatch):
+        """RemGroup only edits the in-memory tree; without saveParameter
+        the removed key -- the API key with it -- stays on disk until
+        FreeCAD's next clean exit."""
+        calls = []
+
+        class _FakeModGroup:
+            def RemGroup(_self, name):
+                calls.append(("RemGroup", name))
+
+        class _FakeFreeCAD:
+            def ParamGet(_self, path):
+                return _FakeModGroup()
+
+            def saveParameter(_self):
+                calls.append(("saveParameter",))
+
+        monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCAD())
+        config_mod._remove_param_group()
+        assert calls == [("RemGroup", "FreeCADAI"), ("saveParameter",)]
 
 
 class TestConfigDirResolution:
