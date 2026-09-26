@@ -1301,3 +1301,65 @@ def test_mcp_server_auth_token_roundtrip():
     cfg = AppConfig(mcp_server_auth_token="s3cr3t")
     restored = AppConfig.from_dict(cfg.to_dict())
     assert restored.mcp_server_auth_token == "s3cr3t"
+
+
+class TestConfigListeners:
+    """#99: one refresh path after the dialog or the preferences page saves."""
+
+    def test_a_listener_is_called(self):
+        from freecad_ai.config import add_config_listener, notify_config_changed
+        calls = []
+        add_config_listener(lambda: calls.append(1))
+        notify_config_changed()
+        assert calls == [1]
+
+    def test_a_removed_listener_is_not_called(self):
+        from freecad_ai.config import (
+            add_config_listener, notify_config_changed, remove_config_listener)
+        calls = []
+        fn = lambda: calls.append(1)  # noqa: E731
+        add_config_listener(fn)
+        remove_config_listener(fn)
+        notify_config_changed()
+        assert calls == []
+
+    def test_removing_an_unknown_listener_is_harmless(self):
+        from freecad_ai.config import remove_config_listener
+        remove_config_listener(lambda: None)
+
+    def test_adding_twice_calls_once(self):
+        from freecad_ai.config import add_config_listener, notify_config_changed
+        calls = []
+        fn = lambda: calls.append(1)  # noqa: E731
+        add_config_listener(fn)
+        add_config_listener(fn)
+        notify_config_changed()
+        assert calls == [1]
+
+    def test_a_raising_listener_does_not_block_the_others(self, caplog):
+        from freecad_ai.config import add_config_listener, notify_config_changed
+        calls = []
+
+        def boom():
+            raise RuntimeError("deleted Qt object")
+
+        add_config_listener(boom)
+        add_config_listener(lambda: calls.append(1))
+        notify_config_changed()
+        assert calls == [1]
+        assert "deleted Qt object" in caplog.text
+
+    def test_a_listener_may_remove_itself_while_being_notified(self):
+        from freecad_ai.config import (
+            add_config_listener, notify_config_changed, remove_config_listener)
+        calls = []
+
+        def once():
+            calls.append("once")
+            remove_config_listener(once)
+
+        add_config_listener(once)
+        add_config_listener(lambda: calls.append("other"))
+        notify_config_changed()
+        notify_config_changed()
+        assert calls == ["once", "other", "other"]

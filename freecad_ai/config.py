@@ -1048,3 +1048,40 @@ def reload_config():
     """Force reload configuration from disk."""
     global _config
     _config = load_config()
+
+
+# ── Config-changed notification (#99) ───────────────────────────────────
+#
+# The Settings dialog and the Edit → Preferences page both save the live
+# config; whoever shows state derived from it (the chat panel) registers
+# here instead of each window knowing about every consumer.
+
+_config_listeners: list = []
+
+
+def add_config_listener(fn) -> None:
+    """Call ``fn()`` after every notify_config_changed(). Idempotent."""
+    if fn not in _config_listeners:
+        _config_listeners.append(fn)
+
+
+def remove_config_listener(fn) -> None:
+    """Stop calling ``fn``. Unknown listeners are ignored."""
+    try:
+        _config_listeners.remove(fn)
+    except ValueError:
+        pass
+
+
+def notify_config_changed() -> None:
+    """Tell every listener the config was saved.
+
+    Iterates over a copy, so a listener may remove itself. One that raises
+    is logged and skipped: a closed panel's stale listener must not stop
+    the others from refreshing.
+    """
+    for fn in list(_config_listeners):
+        try:
+            fn()
+        except Exception:
+            logger.exception("FreeCAD AI: config listener %r failed", fn)
