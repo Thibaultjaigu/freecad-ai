@@ -85,11 +85,11 @@ class TestUtilityMapping:
         assert AppConfig().provider_keys == {}
 
 
-class TestParamStoreBridgeWritesReachTheProfile:
+class TestParamStoreMigrationWritesReachTheProfile:
     def test_apply_overrides_pattern_edits_active_profile(self):
-        """_apply_param_store_overrides assigns cfg.provider.model /
-        .base_url / .api_key / .name. Simulate those assignments and
-        assert they land in the active profile rather than a temporary."""
+        """_migrate_param_store assigns cfg.provider.model / .base_url /
+        .api_key / .name. Simulate those assignments and assert they land
+        in the active profile rather than a temporary."""
         cfg = AppConfig()
         cfg.provider.name = "ollama"
         cfg.provider.model = "qwen3:8b"

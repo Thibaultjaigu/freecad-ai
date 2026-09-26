@@ -73,7 +73,7 @@ class FreeCADAIPrefsPage:
         layout.addStretch()
 
         # None, not {}: saveSettings() treats None as "no successful load
-        # to compare against" and writes nothing (fix round 1, #99).
+        # to compare against" and writes nothing (#99).
         self._behavior_baseline = None
 
     def loadSettings(self):  # noqa: N802 — FreeCAD's name

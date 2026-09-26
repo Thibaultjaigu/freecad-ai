@@ -1,9 +1,11 @@
 """Tests for configuration system."""
 
 import json
+import os
 
 import pytest
 
+import freecad_ai.config as config_mod
 from freecad_ai.config import (
     PROVIDER_PRESETS,
     AppConfig,
@@ -337,8 +339,10 @@ class TestSingleton:
         save_current_config()  # Should not raise
 
 
-class TestParamStoreBridge:
-    """Bridge between FreeCAD's BaseApp/Preferences/Mod/FreeCADAI store and AppConfig."""
+class TestParamStoreMigration:
+    """#99: the preferences page writes config.json itself. A value changed
+    there under an old version, and not yet mirrored, is applied once; the
+    group is then removed, and its absence is the marker."""
 
     def _fake_param_group(self, ints=None, strings=None, bools=None):
         """Mimic the relevant parts of a FreeCAD ParamGet group object."""
@@ -374,276 +378,102 @@ class TestParamStoreBridge:
 
         return _FakeGroup(), ints, strings, bools
 
-    def test_overrides_skipped_when_param_store_unavailable(self):
-        """Outside FreeCAD, _get_param_group returns None — cfg unchanged."""
-        from freecad_ai.config import AppConfig, _apply_param_store_overrides
-        cfg = AppConfig()
-        cfg.provider.name = "anthropic"
-        _apply_param_store_overrides(cfg)  # no FreeCAD → no-op
+    def _run(self, monkeypatch, group):
+        removed = []
+
+        def remove():
+            removed.append(True)
+            for store in self._stores:
+                store.clear()
+
+        monkeypatch.setattr(config_mod, "_get_param_group", lambda: group)
+        monkeypatch.setattr(config_mod, "_remove_param_group", remove)
+        return removed
+
+    def _group(self, **kw):
+        group, ints, strings, bools = self._fake_param_group(**kw)
+        self._stores = (ints, strings, bools)
+        return group
+
+    def test_every_field_is_applied_saved_and_the_group_removed(
+            self, tmp_config_dir, monkeypatch):
+        group = self._group(
+            ints={"ProviderIndex": 2, "ModeIndex": 0, "ThinkingIndex": 1,
+                  "MaxTokens": 9000},
+            strings={"Model": "qwen3:8b", "BaseUrl": "http://h:11434/v1",
+                     "ApiKey": "sk-x"},
+            bools={"EnableTools": False})
+        removed = self._run(monkeypatch, group)
+        cfg = config_mod.load_config()
+        assert (cfg.provider.name, cfg.provider.model) == ("ollama", "qwen3:8b")
+        assert cfg.provider.base_url == "http://h:11434/v1"
+        assert cfg.provider.api_key == "sk-x"
+        assert (cfg.mode, cfg.thinking) == ("plan", "on")
+        assert (cfg.max_tokens, cfg.enable_tools) == (9000, False)
+        with open(config_mod.CONFIG_FILE) as f:
+            assert "qwen3:8b" in f.read()
+        assert removed == [True]
+
+    def test_an_empty_group_is_a_no_op(self, tmp_config_dir, monkeypatch):
+        removed = self._run(monkeypatch, self._group())
+        config_mod.load_config()
+        assert not os.path.exists(config_mod.CONFIG_FILE)
+        assert removed == []
+
+    def test_the_second_load_is_a_no_op(self, tmp_config_dir, monkeypatch):
+        removed = self._run(monkeypatch, self._group(strings={"Model": "m"}))
+        config_mod.load_config()
+        mtime = os.path.getmtime(config_mod.CONFIG_FILE)
+        config_mod.load_config()
+        assert removed == [True]
+        assert os.path.getmtime(config_mod.CONFIG_FILE) == mtime
+
+    def test_no_provider_index_leaves_the_provider_alone(
+            self, tmp_config_dir, monkeypatch):
+        """#12: a missing key is not index 0."""
+        self._run(monkeypatch, self._group(strings={"Model": "m"}))
+        assert config_mod.load_config().provider.name == "anthropic"
+
+    def test_out_of_range_indices_are_ignored(self, tmp_config_dir, monkeypatch):
+        self._run(monkeypatch, self._group(
+            ints={"ProviderIndex": 99, "ModeIndex": 99, "ThinkingIndex": 99}))
+        cfg = config_mod.load_config()
         assert cfg.provider.name == "anthropic"
+        assert cfg.mode == config_mod.AppConfig().mode
+        assert cfg.thinking == config_mod.AppConfig().thinking
 
-    def test_apply_overrides_provider_index(self):
-        from freecad_ai.config import AppConfig, _apply_param_store_overrides
-        from unittest.mock import patch
-        cfg = AppConfig()
-        cfg.provider.name = "anthropic"
-        group, _, _, _ = self._fake_param_group(ints={"ProviderIndex": 2})  # ollama
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg)
-        assert cfg.provider.name == "ollama"
+    def test_the_legacy_order_is_frozen(self, tmp_config_dir, monkeypatch):
+        """Stored indices are positional: 11 was cloudflare before #97, 21
+        is custom since #97. Reordering the registry must not move them."""
+        self._run(monkeypatch, self._group(ints={"ProviderIndex": 21}))
+        assert config_mod.load_config().provider.name == "custom"
+        assert config_mod._LEGACY_PARAM_PROVIDERS[11] == "cloudflare-workers-ai"
+        assert len(config_mod._LEGACY_PARAM_PROVIDERS) == 22
 
-    def test_apply_overrides_strings(self):
-        from freecad_ai.config import AppConfig, _apply_param_store_overrides
-        from unittest.mock import patch
-        cfg = AppConfig()
-        group, _, _, _ = self._fake_param_group(strings={
-            "Model": "qwen3-vl:32b",
-            "BaseUrl": "http://spark:11434/v1",
-            "ApiKey": "cmd:secret-tool lookup service freecad-ai",
-        })
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg)
-        assert cfg.provider.model == "qwen3-vl:32b"
-        assert cfg.provider.base_url == "http://spark:11434/v1"
-        assert cfg.provider.api_key == "cmd:secret-tool lookup service freecad-ai"
+    def test_a_failed_save_keeps_the_group_for_next_time(
+            self, tmp_config_dir, monkeypatch, caplog):
+        """Review Focus 5: startup must not fail, and nothing is lost."""
+        removed = self._run(monkeypatch, self._group(strings={"Model": "m"}))
 
-    def test_apply_overrides_bool_and_int(self):
-        from freecad_ai.config import AppConfig, _apply_param_store_overrides
-        from unittest.mock import patch
-        cfg = AppConfig()
-        cfg.enable_tools = True
-        cfg.max_tokens = 4096
-        group, _, _, _ = self._fake_param_group(
-            bools={"EnableTools": False},
-            ints={"MaxTokens": 8192, "ModeIndex": 1, "ThinkingIndex": 2},
-        )
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg)
-        assert cfg.enable_tools is False
-        assert cfg.max_tokens == 8192
-        assert cfg.mode == "act"
-        assert cfg.thinking == "extended"
+        def disk_full(_cfg):
+            raise OSError("No space left on device")
 
-    def test_apply_overrides_skips_untouched_keys(self):
-        """Param store with no relevant keys → cfg untouched."""
-        from freecad_ai.config import AppConfig, _apply_param_store_overrides
-        from unittest.mock import patch
-        cfg = AppConfig()
-        cfg.provider.name = "anthropic"
-        cfg.max_tokens = 4096
-        group, _, _, _ = self._fake_param_group()  # all empty
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg)
-        assert cfg.provider.name == "anthropic"
-        assert cfg.max_tokens == 4096
+        monkeypatch.setattr(config_mod, "save_config", disk_full)
+        cfg = config_mod.load_config()
+        assert cfg.provider.model == "m"
+        assert removed == []
+        assert "No space left" in caplog.text
 
-    def test_apply_ignores_out_of_range_index(self):
-        """Defensive — corrupt param store with bad enum index leaves cfg alone."""
-        from freecad_ai.config import AppConfig, _apply_param_store_overrides
-        from unittest.mock import patch
-        cfg = AppConfig()
-        cfg.mode = "plan"
-        group, _, _, _ = self._fake_param_group(ints={"ModeIndex": 99})
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg)
-        assert cfg.mode == "plan"
+    def test_outside_freecad_nothing_happens(self, tmp_config_dir):
+        config_mod.load_config()          # _get_param_group() returns None
+        assert not os.path.exists(config_mod.CONFIG_FILE)
 
-    def test_load_config_seeds_empty_param_store_from_json(self, tmp_path, monkeypatch):
-        """Regression: Edit → Preferences was showing blank fields when JSON
-        had values but the param store was empty (e.g., user upgraded from
-        v0.11.x where ParamGet bridge didn't exist). load_config must seed
-        the param store from JSON so Gui::Pref* widgets see current values.
-        """
-        from unittest.mock import patch
-        import freecad_ai.config as config_mod
-
-        cfg_dir = tmp_path / "FreeCADAI"
-        cfg_dir.mkdir()
-        cfg_file = cfg_dir / "config.json"
-        cfg_file.write_text(json.dumps({
-            "provider": {
-                "name": "ollama",
-                "model": "qwen3-vl:32b",
-                "base_url": "http://spark:11434/v1",
-                "api_key": "cmd:secret-tool lookup service freecad-ai",
-            },
-            "mode": "act",
-            "thinking": "on",
-            "max_tokens": 8192,
-            "enable_tools": False,
-        }))
-        monkeypatch.setattr(config_mod, "CONFIG_FILE", str(cfg_file))
-        monkeypatch.setattr(config_mod, "CONFIG_DIR", str(cfg_dir))
-
-        group, ints, strings, bools = self._fake_param_group()  # empty store
-        with patch.object(config_mod, "_get_param_group", return_value=group):
-            cfg = config_mod.load_config()
-
-        # JSON values land in the in-memory cfg
-        assert cfg.provider.name == "ollama"
-        assert cfg.provider.model == "qwen3-vl:32b"
-        assert cfg.provider.base_url == "http://spark:11434/v1"
-        assert cfg.mode == "act"
-
-        # Param store now mirrors JSON — Edit → Preferences will read these
-        assert ints.get("ProviderIndex") == config_mod._PARAM_PROVIDERS.index("ollama")
-        assert strings.get("Model") == "qwen3-vl:32b"
-        assert strings.get("BaseUrl") == "http://spark:11434/v1"
-        assert strings.get("ApiKey") == "cmd:secret-tool lookup service freecad-ai"
-        assert ints.get("ModeIndex") == config_mod._PARAM_MODES.index("act")
-        assert ints.get("ThinkingIndex") == config_mod._PARAM_THINKING.index("on")
-        assert ints.get("MaxTokens") == 8192
-        assert bools.get("EnableTools") is False
-
-    def test_load_config_param_store_wins_over_json(self, tmp_path, monkeypatch):
-        """If the user changed a value in Edit → Preferences (param store)
-        and JSON has a different value, the param-store value wins on load.
-        After seeding, both surfaces reflect the param-store value.
-        """
-        from unittest.mock import patch
-        import freecad_ai.config as config_mod
-
-        cfg_dir = tmp_path / "FreeCADAI"
-        cfg_dir.mkdir()
-        cfg_file = cfg_dir / "config.json"
-        cfg_file.write_text(json.dumps({
-            "provider": {"name": "anthropic", "model": "claude-sonnet-4-20250514"},
-            "max_tokens": 4096,
-        }))
-        monkeypatch.setattr(config_mod, "CONFIG_FILE", str(cfg_file))
-        monkeypatch.setattr(config_mod, "CONFIG_DIR", str(cfg_dir))
-
-        group, ints, strings, bools = self._fake_param_group(
-            ints={"ProviderIndex": config_mod._PARAM_PROVIDERS.index("ollama"), "MaxTokens": 16384},
-            strings={"Model": "qwen3-vl:32b"},
-        )
-        with patch.object(config_mod, "_get_param_group", return_value=group):
-            cfg = config_mod.load_config()
-
-        # ParamGet wins — preference page changes survive
-        assert cfg.provider.name == "ollama"
-        assert cfg.provider.model == "qwen3-vl:32b"
-        assert cfg.max_tokens == 16384
-
-    def test_write_to_param_store_round_trips(self):
-        """Write then re-apply via overrides — values come back identical."""
-        from freecad_ai.config import (
-            AppConfig, _apply_param_store_overrides, _write_to_param_store,
-        )
-        from unittest.mock import patch
-        group, ints, strings, bools = self._fake_param_group()
-
-        cfg_out = AppConfig()
-        cfg_out.provider.name = "ollama"
-        cfg_out.provider.model = "gemma3:4b"
-        cfg_out.provider.base_url = "http://spark:11434/v1"
-        cfg_out.provider.api_key = "file:/etc/keys/api"
-        cfg_out.mode = "act"
-        cfg_out.thinking = "on"
-        cfg_out.max_tokens = 16384
-        cfg_out.enable_tools = False
-
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _write_to_param_store(cfg_out)
-
-        cfg_in = AppConfig()  # fresh defaults
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg_in)
-
-        assert cfg_in.provider.name == "ollama"
-        assert cfg_in.provider.model == "gemma3:4b"
-        assert cfg_in.provider.base_url == "http://spark:11434/v1"
-        assert cfg_in.provider.api_key == "file:/etc/keys/api"
-        assert cfg_in.mode == "act"
-        assert cfg_in.thinking == "on"
-        assert cfg_in.max_tokens == 16384
-        assert cfg_in.enable_tools is False
-
-    def test_write_clears_stale_provider_index_for_unknown_provider(self):
-        """Issue #12: saving a non-prefs provider must clear ProviderIndex.
-
-        Since #97 every preset is in the prefs combo, so the only names
-        left that it cannot show are ones that are not presets at all.
-
-        Scenario: user previously had anthropic (ProviderIndex=0 in the
-        param store), then switched to "custom" via the main Settings
-        dialog. Without clearing, the stale index would shadow the JSON
-        name on next load and the provider selector would revert to
-        anthropic with the custom URL/model still attached.
-        """
-        from freecad_ai.config import (
-            AppConfig, _apply_param_store_overrides, _write_to_param_store,
-        )
-        from unittest.mock import patch
-
-        group, ints, strings, _ = self._fake_param_group(
-            ints={"ProviderIndex": 0},  # stale: anthropic from before
-            strings={"Model": "claude-sonnet-4", "BaseUrl": "https://api.anthropic.com"},
-        )
-
-        cfg_out = AppConfig()
-        cfg_out.provider.name = "no-such-provider"  # e.g. from a newer version
-        cfg_out.provider.model = "my-local-model"
-        cfg_out.provider.base_url = "http://gateway.example/v1"
-        cfg_out.provider.api_key = "secret"
-
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _write_to_param_store(cfg_out)
-
-        # ProviderIndex must be cleared so the load path doesn't shadow JSON
-        assert "ProviderIndex" not in ints
-        # Other fields still mirrored
-        assert strings["Model"] == "my-local-model"
-        assert strings["BaseUrl"] == "http://gateway.example/v1"
-
-        # Round-trip: applying overrides onto a fresh cfg loaded from JSON
-        # must keep the name — the absent ProviderIndex means no override.
-        cfg_in = AppConfig()
-        cfg_in.provider.name = "no-such-provider"  # as it would be after JSON load
-        cfg_in.provider.model = "my-local-model"
-        cfg_in.provider.base_url = "http://gateway.example/v1"
-        with patch("freecad_ai.config._get_param_group", return_value=group):
-            _apply_param_store_overrides(cfg_in)
-
-        assert cfg_in.provider.name == "no-such-provider"
-        assert cfg_in.provider.model == "my-local-model"
-        assert cfg_in.provider.base_url == "http://gateway.example/v1"
-
-    def test_every_settings_dialog_provider_survives_the_prefs_page(self):
-        """Issue #97: the prefs combo writes its current index back on every
-        OK in Edit → Preferences, whether or not the user touched it. So
-        every provider the Settings dialog offers must get a ProviderIndex
-        that maps back to itself -- a missing one leaves the combo on
-        "anthropic", and that is what gets written into the profile.
-        """
-        from freecad_ai.config import (
-            AppConfig, _PARAM_PROVIDERS, _write_to_param_store,
-        )
-        from freecad_ai.llm.providers import get_provider_names
-        from unittest.mock import patch
-
-        for name in get_provider_names():
-            group, ints, _, _ = self._fake_param_group()
-            cfg = AppConfig()
-            cfg.provider.name = name
-            with patch("freecad_ai.config._get_param_group", return_value=group):
-                _write_to_param_store(cfg)
-            assert "ProviderIndex" in ints, (
-                f"provider={name!r} has no entry in the prefs combo")
-            assert _PARAM_PROVIDERS[ints["ProviderIndex"]] == name
-
-    def test_stored_provider_indices_keep_their_meaning(self):
-        """ProviderIndex is positional and already sits in users' param
-        stores. These twelve positions shipped before #97 and must never
-        move -- reorder them and every stored index points at the wrong
-        provider.
-        """
-        from freecad_ai.config import _PARAM_PROVIDERS
-        assert _PARAM_PROVIDERS[:12] == [
-            "anthropic", "openai", "ollama", "gemini", "openrouter",
-            "moonshot", "deepseek", "qwen", "groq", "mistral", "together",
-            "cloudflare-workers-ai",
-        ]
+    def test_saving_no_longer_touches_the_param_store(
+            self, tmp_config_dir, monkeypatch):
+        group = self._group()
+        monkeypatch.setattr(config_mod, "_get_param_group", lambda: group)
+        config_mod.save_config(config_mod.AppConfig())
+        assert self._stores == ({}, {}, {})
 
 
 class TestConfigDirResolution:
@@ -1223,9 +1053,6 @@ class TestLogsDir:
         from freecad_ai import config
         config._ensure_dirs()
         assert os.path.isdir(config.LOGS_DIR)
-
-
-import os
 
 
 def test_max_tool_turns_default():
