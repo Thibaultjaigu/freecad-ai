@@ -42,7 +42,8 @@ QListWidgetItem = QtWidgets.QListWidgetItem
 QFileDialog = QtWidgets.QFileDialog
 QMessageBox = QtWidgets.QMessageBox
 
-from ..config import get_config, save_current_config, PROVIDER_PRESETS
+from ..config import (get_config, notify_config_changed, save_current_config,
+                      PROVIDER_PRESETS)
 from .provider_section import ProviderSection
 
 # Thinking combo index -> config value. Shared by _save and _test_connection.
@@ -1267,6 +1268,10 @@ class SettingsDialog(QDialog):
 
         save_current_config()
 
+        # The chat panel (and anything else showing config-derived state)
+        # refreshes from this, whichever window saved (#99).
+        notify_config_changed()
+
         # The menu's "Keep Chat Panel Open" tick mirrors this flag, and
         # FreeCAD never re-asks the command for its state, so changing it here
         # would otherwise leave the checkmark stale until FreeCAD restarts.
@@ -1428,8 +1433,8 @@ class SettingsDialog(QDialog):
 
         Test Connection probes whichever profile is on screen, which need
         not be the active one, so the answer belongs to that profile and
-        nowhere else. It lands in the dialog's working copy like every
-        other profile field and reaches the config on OK.
+        nowhere else. It lands in the ProviderSection's working copy like
+        every other profile field and reaches the config on OK.
         """
         self.test_btn.setEnabled(True)
         self.save_btn.setEnabled(True)
