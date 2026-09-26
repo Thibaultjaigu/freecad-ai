@@ -49,7 +49,6 @@ def _fake_save_dialog(preserve):
         getattr(fake, combo).currentIndex.return_value = 0
     fake.rerank_pinned_edit.text.return_value = ""
     fake._parse_server_address.return_value = ("127.0.0.1", 8765)
-    fake.utility_combos = {}
     fake.prompt_cache_check.isChecked.return_value = False
     fake.log_usage_check.isChecked.return_value = False
     fake.preserve_reasoning_check.isChecked.return_value = preserve

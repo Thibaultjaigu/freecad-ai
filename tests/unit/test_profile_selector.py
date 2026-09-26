@@ -1,7 +1,10 @@
 """Profile management: rename cascades, delete never orphans.
 
-These call the dialog's methods with a fake self carrying only the
-attributes they touch, so no Qt dialog has to be constructed.
+These call the methods with a fake self carrying only the attributes they
+touch, so no Qt widget has to be constructed. The profile handling moved
+from SettingsDialog into ProviderSection (#99); the tests of what stayed
+in the dialog (the params table, _save, Test Connection) give their fake
+a ``provider_section`` instead.
 """
 
 import copy
@@ -26,6 +29,7 @@ from freecad_ai.config import (  # noqa: E402
     ProviderConfig,
 )
 from freecad_ai.llm.providers import get_provider_names  # noqa: E402
+from freecad_ai.ui.provider_section import ProviderSection  # noqa: E402
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
 
 
@@ -67,19 +71,19 @@ class TestRenameCascade:
     def test_profile_is_renamed(self):
         cfg = _cfg()
         fake = _FakeSelf(cfg)
-        SettingsDialog._rename_profile(fake, "local", "ollama-local")
+        ProviderSection._rename_profile(fake, "local", "ollama-local")
         assert set(fake._profiles) == {"cloud", "ollama-local"}
 
     def test_settings_travel_with_the_name(self):
         cfg = _cfg()
         fake = _FakeSelf(cfg)
-        SettingsDialog._rename_profile(fake, "local", "ollama-local")
+        ProviderSection._rename_profile(fake, "local", "ollama-local")
         assert fake._profiles["ollama-local"].model == "qwen3:8b"
 
     def test_active_profile_follows(self):
         cfg = _cfg()
         fake = _FakeSelf(cfg)
-        SettingsDialog._rename_profile(fake, "cloud", "anthropic-main")
+        ProviderSection._rename_profile(fake, "cloud", "anthropic-main")
         assert fake._active_profile == "anthropic-main"
 
     def test_utility_mappings_follow(self):
@@ -87,55 +91,55 @@ class TestRenameCascade:
         it was using."""
         cfg = _cfg()
         cfg.utility_profiles = {"compaction": "local", "rerank": "local"}
-        SettingsDialog._rename_profile(_FakeSelf(cfg), "local", "cheap")
+        ProviderSection._rename_profile(_FakeSelf(cfg), "local", "cheap")
         assert cfg.utility_profiles == {"compaction": "cheap", "rerank": "cheap"}
 
     def test_unrelated_mappings_are_untouched(self):
         cfg = _cfg()
         cfg.utility_profiles = {"compaction": "cloud", "rerank": "local"}
-        SettingsDialog._rename_profile(_FakeSelf(cfg), "local", "cheap")
+        ProviderSection._rename_profile(_FakeSelf(cfg), "local", "cheap")
         assert cfg.utility_profiles["compaction"] == "cloud"
 
     def test_ordering_is_preserved(self):
         """Rebuilding the dict must not reshuffle the combo on the user."""
         cfg = _cfg()
         fake = _FakeSelf(cfg)
-        SettingsDialog._rename_profile(fake, "cloud", "zzz")
+        ProviderSection._rename_profile(fake, "cloud", "zzz")
         assert list(fake._profiles) == ["zzz", "local"]
 
     def test_collision_is_refused(self):
         cfg = _cfg()
         with pytest.raises(ValueError):
-            SettingsDialog._rename_profile(_FakeSelf(cfg), "local", "cloud")
+            ProviderSection._rename_profile(_FakeSelf(cfg), "local", "cloud")
 
     def test_empty_name_is_refused(self):
         cfg = _cfg()
         with pytest.raises(ValueError):
-            SettingsDialog._rename_profile(_FakeSelf(cfg), "local", "  ")
+            ProviderSection._rename_profile(_FakeSelf(cfg), "local", "  ")
 
     def test_renaming_to_itself_is_a_no_op(self):
         cfg = _cfg()
         fake = _FakeSelf(cfg)
-        SettingsDialog._rename_profile(fake, "local", "local")
+        ProviderSection._rename_profile(fake, "local", "local")
         assert set(fake._profiles) == {"cloud", "local"}
 
 
 class TestDelete:
     def test_profile_is_removed(self):
         cfg = _cfg()
-        SettingsDialog._delete_profile(_FakeSelf(cfg), "local")
+        ProviderSection._delete_profile(_FakeSelf(cfg), "local")
         assert set(cfg.profiles) == {"cloud"}
 
     def test_deleting_the_last_profile_is_refused(self):
         cfg = _cfg()
         del cfg.profiles["local"]
         with pytest.raises(ValueError):
-            SettingsDialog._delete_profile(_FakeSelf(cfg), "cloud")
+            ProviderSection._delete_profile(_FakeSelf(cfg), "cloud")
 
     def test_deleting_the_active_profile_moves_the_pointer(self):
         cfg = _cfg()
         fake = _FakeSelf(cfg)
-        SettingsDialog._delete_profile(fake, "cloud")
+        ProviderSection._delete_profile(fake, "cloud")
         assert fake._active_profile == "local"
 
     def test_utilities_pointing_at_it_fall_back_to_inherit(self):
@@ -143,13 +147,22 @@ class TestDelete:
         but clearing it keeps the dialog honest about what is configured."""
         cfg = _cfg()
         cfg.utility_profiles = {"compaction": "local"}
-        SettingsDialog._delete_profile(_FakeSelf(cfg), "local")
+        ProviderSection._delete_profile(_FakeSelf(cfg), "local")
         assert cfg.utility_profiles.get("compaction", "") == ""
 
     def test_deleting_an_unknown_profile_is_refused(self):
         cfg = _cfg()
         with pytest.raises(ValueError):
-            SettingsDialog._delete_profile(_FakeSelf(cfg), "nope")
+            ProviderSection._delete_profile(_FakeSelf(cfg), "nope")
+
+
+class _Sig:
+    """Stand-in for a Qt signal on a fake self."""
+    def __init__(self):
+        self.calls = []
+
+    def emit(self, *args):
+        self.calls.append(args)
 
 
 class _Edit:
@@ -279,17 +292,15 @@ class TestProfileFieldRoundTrip:
             model_edit=_Edit(prof.model),
             provider_combo=_Combo(get_provider_names().index(prof.name)),
             profile_active_check=_Check(),
+            profileShown=_Sig(),
+            aboutToCommit=_Sig(),
+            presetApplied=_Sig(),
         )
-        fake._load_model_params_table = lambda model, cfg=None, profile=None: None
-        fake._read_model_params_table = (
-            lambda: dict(fake._profiles[fake._current_profile_label].params))
         fake._update_vision_ui = lambda profile: None
         return fake
 
     def test_edited_base_url_survives_switching_away_and_back(self):
         from freecad_ai.config import AppConfig, ProviderConfig
-        from freecad_ai.ui.settings_dialog import SettingsDialog
-
         cfg = AppConfig()
         cfg.profiles = {
             "main": ProviderConfig(name="anthropic",
@@ -303,21 +314,19 @@ class TestProfileFieldRoundTrip:
 
         fake = self._fake(cfg, "local")
         fake.base_url_edit.setText("http://spark-2448:11434/v1")
-        SettingsDialog._commit_profile_fields(fake)
+        ProviderSection._commit_profile_fields(fake)
         assert cfg.profiles["local"].base_url == "http://spark-2448:11434/v1"
 
         # Browse to the other profile and back.
-        SettingsDialog._show_profile(fake, "main")
+        ProviderSection._show_profile(fake, "main")
         assert fake.base_url_edit.text() == "https://api.anthropic.com/v1"
         assert cfg.profiles["local"].base_url == "http://spark-2448:11434/v1"
 
-        SettingsDialog._show_profile(fake, "local")
+        ProviderSection._show_profile(fake, "local")
         assert fake.base_url_edit.text() == "http://spark-2448:11434/v1"
 
     def test_programmatic_provider_move_is_signal_guarded(self):
         from freecad_ai.config import AppConfig, ProviderConfig
-        from freecad_ai.ui.settings_dialog import SettingsDialog
-
         cfg = AppConfig()
         cfg.profiles = {
             "main": ProviderConfig(name="anthropic", base_url="u1",
@@ -329,7 +338,7 @@ class TestProfileFieldRoundTrip:
 
         fake = self._fake(cfg, "main")
         fake.provider_combo.calls.clear()
-        SettingsDialog._show_profile(fake, "local")
+        ProviderSection._show_profile(fake, "local")
 
         # setCurrentIndex must happen between block(True) and block(False),
         # or _on_provider_changed fires and overwrites the profile's URL
@@ -369,7 +378,7 @@ class TestCancelDiscardsProfileEdits:
             _utility_profiles=dict(cfg.utility_profiles),
         )
 
-        SettingsDialog._delete_profile(fake, "local")
+        ProviderSection._delete_profile(fake, "local")
 
         # The assertion that matters is on cfg, not the working copy —
         # Cancel (a bare reject(), no rollback) relies on cfg never having
@@ -380,87 +389,88 @@ class TestCancelDiscardsProfileEdits:
         assert "local" not in fake._profiles
 
 
-class TestSaveWritesBackProfileState:
-    """OK persists: `_save` must copy the dialog's working profile state
-    into the real config, including a profile added during the session."""
+def _fake_save_dialog():
+    """MagicMock fake for SettingsDialog._save. _save touches a lot of
+    unrelated widgets that only need to not raise; the profiles are the
+    section's business (TestRoundTrip in test_provider_section.py)."""
+    fake = MagicMock()
+    fake._read_model_params_table = lambda: {}
+    fake._read_strip_thinking_state = lambda: None
+    fake._get_default_prompt_text = lambda: ""
+    fake._parse_server_address = lambda host, port: ("127.0.0.1", 8765)
+    fake._parse_allowed_hosts = lambda text: []
+    fake.accept = lambda: None
+    fake.provider_section.model_edit.text.return_value = "some-model"
+    fake.thinking_combo.currentIndex.return_value = 0
+    fake.viewport_capture_combo.currentIndex.return_value = 0
+    fake.viewport_resolution_combo.currentIndex.return_value = 0
+    fake.rerank_method_combo.currentIndex.return_value = 0
+    fake.system_prompt_edit.toPlainText.return_value = ""
+    fake.rerank_pinned_edit.text.return_value = ""
+    return fake
 
-    def test_save_writes_profiles_and_active_profile_back(self, monkeypatch):
-        cfg = _cfg()
-        working = copy.deepcopy(cfg.profiles)
-        working["added"] = ProviderConfig(
-            name="ollama", base_url="http://localhost:11434/v1",
-            model="added-model")
-        names = get_provider_names()
-        idx = names.index("ollama")
 
-        fake = MagicMock()
-        fake._profiles = working
-        fake._active_profile = "added"
-        fake._current_profile_label = "added"
-        # _commit_profile_fields is the real method — it is what reads the
-        # (fake) widgets below into the working profile before the write-back.
-        fake._commit_profile_fields = (
-            lambda: SettingsDialog._commit_profile_fields(fake))
-        fake._read_model_params_table = lambda: {}
-        fake._read_strip_thinking_state = lambda: None
-        fake._get_default_prompt_text = lambda: ""
-        fake._parse_server_address = lambda host, port: ("127.0.0.1", 8765)
-        fake._parse_allowed_hosts = lambda text: []
-        fake.accept = lambda: None
+class TestSaveHandsTheProfilesToTheSection:
+    """OK persists: `_save` commits the section, confirms, then has the
+    section write its working copy into the real config."""
 
-        fake.provider_combo.currentIndex.return_value = idx
-        fake.api_key_edit.text.return_value = "k-added"
-        fake.base_url_edit.text.return_value = "http://localhost:11434/v1"
-        fake.model_edit.text.return_value = "added-model"
-        fake.thinking_combo.currentIndex.return_value = 0
-        fake.viewport_capture_combo.currentIndex.return_value = 0
-        fake.viewport_resolution_combo.currentIndex.return_value = 0
-        fake.rerank_method_combo.currentIndex.return_value = 0
-        fake.system_prompt_edit.toPlainText.return_value = ""
-        fake.rerank_pinned_edit.text.return_value = ""
-        # utility_combos is a plain dict on the real dialog; an unconfigured
-        # MagicMock's .items() default-iterates empty, so _collect_utility_
-        # profiles({}) == {} — nothing to stub for the utility dropdowns here.
-
+    def test_save_hands_the_profiles_to_the_section(self, monkeypatch):
+        cfg = AppConfig()
         monkeypatch.setattr(
             "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
         monkeypatch.setattr(
             "freecad_ai.ui.settings_dialog.save_current_config", lambda: None)
-
+        fake = _fake_save_dialog()
+        fake._confirm_incomplete_profiles.return_value = True
         SettingsDialog._save(fake)
+        fake.provider_section.commit.assert_called_once_with()
+        fake._confirm_incomplete_profiles.assert_called_once_with(
+            fake.provider_section.profiles.return_value)
+        fake.provider_section.apply_to.assert_called_once_with(cfg)
 
-        assert set(cfg.profiles) == {"cloud", "local", "added"}
-        assert cfg.active_profile == "added"
-        assert cfg.profiles["added"].model == "added-model"
+    def test_commit_happens_before_the_confirmation_and_the_write(
+            self, monkeypatch):
+        cfg = AppConfig()
+        monkeypatch.setattr(
+            "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
+        monkeypatch.setattr(
+            "freecad_ai.ui.settings_dialog.save_current_config", lambda: None)
+        fake = _fake_save_dialog()
+        order = []
+        fake.provider_section.commit.side_effect = (
+            lambda: order.append("commit"))
+        fake._confirm_incomplete_profiles.side_effect = (
+            lambda profiles: order.append("confirm") or True)
+        fake.provider_section.apply_to.side_effect = (
+            lambda c: order.append("apply"))
+        SettingsDialog._save(fake)
+        assert order == ["commit", "confirm", "apply"]
+
+    def test_a_declined_confirmation_writes_nothing(self, monkeypatch):
+        cfg = AppConfig()
+        monkeypatch.setattr(
+            "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
+        fake = _fake_save_dialog()
+        fake._confirm_incomplete_profiles.return_value = False
+        SettingsDialog._save(fake)
+        fake.provider_section.apply_to.assert_not_called()
 
 
-class TestWorkingCopyIsIndependent:
-    """A shallow `dict(cfg.profiles)` would pass both tests above and still
-    fail this one — the ProviderConfig objects would be shared, so editing
-    the working copy would edit cfg through the back door. Pins `deepcopy`
-    specifically."""
+class TestLoadHandsTheConfigToTheSection:
+    """The working copy is the section's now: ProviderSection.load deep-
+    copies (TestRoundTrip::test_mutating_the_working_copy_leaves_cfg_alone
+    in test_provider_section.py pins the deepcopy). The dialog's part is
+    handing it the config."""
 
-    def test_mutating_the_working_copy_leaves_cfg_alone(self, monkeypatch):
+    def test_load_from_config_loads_the_section(self, monkeypatch):
         cfg = _cfg()
         fake = MagicMock()
-        # self._refresh_profile_combo() and self._show_profile(...) below
-        # resolve to fake's own auto-stubbed attributes (fake is a bare
-        # MagicMock, not a SettingsDialog instance), so their real bodies —
-        # and the widgets those bodies touch — never run here.
-
         monkeypatch.setattr(
             "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
 
         SettingsDialog._load_from_config(fake)
 
-        # First pin that a working copy was actually populated (fails loudly,
-        # rather than vacuously passing below, if _load_from_config never
-        # sets self._profiles at all).
-        assert fake._profiles["local"].model == cfg.profiles["local"].model
-
-        fake._profiles["local"].base_url = "http://mutated:9999/v1"
-
-        assert cfg.profiles["local"].base_url != "http://mutated:9999/v1"
+        fake.provider_section.load.assert_called_once_with(cfg)
 
 
 # Test Connection used to stage the visible widget values in the config
@@ -487,69 +497,10 @@ class TestWorkingCopyIsIndependent:
 # profile is now the sole source (see TestParamsTableShowsOnlyTheProfile
 # and tests/unit/test_create_client.py::TestParamLayering).
 
-class TestParamsTableEditSurvivesSaveAndResolve:
-    """The regression, end to end — this is the test that would have
-    caught the bug."""
-
-    def _migrated_cfg(self):
-        """A profile whose params were also copied into cfg.model_params
-        by migration — the exact shape that hid the bug."""
-        cfg = AppConfig()
-        cfg.profiles = {
-            "cloud": ProviderConfig(
-                name="anthropic", model="claude-sonnet-4-6",
-                params={"temperature": 1}),
-        }
-        cfg.active_profile = "cloud"
-        cfg.model_params = {"claude-sonnet-4-6": {"temperature": 1}}
-        return cfg
-
-    def _fake_for_save(self, cfg, table_params):
-        """Mirrors TestSaveWritesBackProfileState's fake — _save touches a
-        lot of unrelated widgets that only need to not raise."""
-        prof = cfg.profiles[cfg.active_profile]
-        working = copy.deepcopy(cfg.profiles)
-
-        fake = MagicMock()
-        fake._profiles = working
-        fake._active_profile = cfg.active_profile
-        fake._current_profile_label = cfg.active_profile
-        fake._commit_profile_fields = (
-            lambda: SettingsDialog._commit_profile_fields(fake))
-        fake._read_model_params_table = lambda: dict(table_params)
-        fake._read_strip_thinking_state = lambda: None
-        fake._get_default_prompt_text = lambda: ""
-        fake._parse_server_address = lambda host, port: ("127.0.0.1", 8765)
-        fake._parse_allowed_hosts = lambda text: []
-        fake.accept = lambda: None
-
-        names = get_provider_names()
-        fake.provider_combo.currentIndex.return_value = names.index(prof.name)
-        fake.api_key_edit.text.return_value = prof.api_key
-        fake.base_url_edit.text.return_value = prof.base_url
-        fake.model_edit.text.return_value = prof.model
-        fake.thinking_combo.currentIndex.return_value = 0
-        fake.viewport_capture_combo.currentIndex.return_value = 0
-        fake.viewport_resolution_combo.currentIndex.return_value = 0
-        fake.rerank_method_combo.currentIndex.return_value = 0
-        fake.system_prompt_edit.toPlainText.return_value = ""
-        fake.rerank_pinned_edit.text.return_value = ""
-        return fake
-
-    def test_edit_survives_save_and_resolve_params(self, monkeypatch):
-        from freecad_ai.llm.client import resolve_params
-
-        cfg = self._migrated_cfg()
-        fake = self._fake_for_save(cfg, {"temperature": 0.2})
-
-        monkeypatch.setattr(
-            "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
-        monkeypatch.setattr(
-            "freecad_ai.ui.settings_dialog.save_current_config", lambda: None)
-
-        SettingsDialog._save(fake)
-
-        assert resolve_params(cfg, cfg.provider)["temperature"] == 0.2
+# The end-to-end regression (table edit -> _save -> resolve_params) needs
+# the section and the table actually wired together, so it runs on a real
+# dialog: test_settings_dialog_section_wiring.py::
+# test_edit_survives_save_and_resolve_params.
 
 
 class TestParamsTableShowsOnlyTheProfile:
@@ -559,12 +510,10 @@ class TestParamsTableShowsOnlyTheProfile:
 
     def _fake(self, cfg, label):
         prof = cfg.profiles[label]
-        fake = types.SimpleNamespace(
-            _cfg=cfg,
-            _profiles=cfg.profiles,
-            _current_profile_label=label,
-            provider_combo=_Combo(get_provider_names().index(prof.name)),
-        )
+        section = MagicMock()
+        section.current_provider_name.return_value = prof.name
+        section.current_profile.return_value = prof
+        fake = types.SimpleNamespace(_cfg=cfg, provider_section=section)
         fake._captured = {}
         fake._populate_model_params_table = fake._captured.update
         return fake
@@ -626,54 +575,10 @@ class TestParamsTableShowsOnlyTheProfile:
         assert fake._captured == {"temperature": 0.42}
 
 
-class TestParamsDoNotLeakBetweenProfiles:
-    """Switching profiles must not let one profile's params bleed into,
-    or overwrite, another's."""
-
-    def test_switching_a_b_a_keeps_each_profiles_own_params(self):
-        cfg = AppConfig()
-        cfg.profiles = {
-            "a": ProviderConfig(name="anthropic", model="model-a",
-                                params={"temperature": 0.1}),
-            "b": ProviderConfig(name="anthropic", model="model-b",
-                                params={"temperature": 0.9}),
-        }
-        cfg.active_profile = "a"
-        table = {}
-
-        fake = types.SimpleNamespace(
-            _cfg=cfg,
-            _profiles=cfg.profiles,
-            _active_profile=cfg.active_profile,
-            _current_profile_label="a",
-            base_url_edit=_Edit(cfg.profiles["a"].base_url),
-            api_key_edit=_Edit(cfg.profiles["a"].api_key),
-            model_edit=_Edit(cfg.profiles["a"].model),
-            provider_combo=_Combo(get_provider_names().index("anthropic")),
-            profile_active_check=_Check(),
-        )
-        fake._populate_model_params_table = (
-            lambda params: (table.clear(), table.update(params)))
-        fake._read_model_params_table = lambda: dict(table)
-        fake._load_model_params_table = (
-            lambda model, cfg=None, profile=None:
-                SettingsDialog._load_model_params_table(
-                    fake, model, cfg, profile))
-        fake._update_vision_ui = lambda profile: None
-
-        SettingsDialog._show_profile(fake, "a")
-        assert table["temperature"] == 0.1
-
-        SettingsDialog._commit_profile_fields(fake)
-        SettingsDialog._show_profile(fake, "b")
-        assert table["temperature"] == 0.9
-
-        SettingsDialog._commit_profile_fields(fake)
-        SettingsDialog._show_profile(fake, "a")
-        assert table["temperature"] == 0.1
-
-        assert cfg.profiles["a"].params["temperature"] == 0.1
-        assert cfg.profiles["b"].params["temperature"] == 0.9
+# Switching profiles a -> b -> a must not let one profile's params bleed
+# into another's. That is the section's signals driving the dialog's table,
+# so it runs on a real dialog: test_settings_dialog_section_wiring.py::
+# test_a_b_a_keeps_each_profiles_own_params.
 
 
 class TestOnModelChangedDoesNotMutateLiveConfig:
@@ -685,13 +590,12 @@ class TestOnModelChangedDoesNotMutateLiveConfig:
         prof = cfg.profiles["cloud"]
         original_model_params = copy.deepcopy(cfg.model_params)
 
+        section = MagicMock()
+        section.current_profile.return_value = prof
         fake = types.SimpleNamespace(
             _cfg=cfg,
-            _profiles=cfg.profiles,
-            _current_profile_label="cloud",
             _last_model_name=prof.model,
-            model_edit=_Edit("new-model-name"),
-            provider_combo=_Combo(get_provider_names().index(prof.name)),
+            provider_section=section,
         )
         fake._read_model_params_table = lambda: {"temperature": 0.42}
         fake._populate_model_params_table = lambda params: None
@@ -700,7 +604,7 @@ class TestOnModelChangedDoesNotMutateLiveConfig:
             fake._last_model_name = model
         fake._load_model_params_table = _stub_load
 
-        SettingsDialog._on_model_changed(fake)
+        SettingsDialog._on_model_changed(fake, "new-model-name")
 
         assert cfg.model_params == original_model_params
         assert prof.params == {"temperature": 0.42}
@@ -713,14 +617,12 @@ class TestTestConnectionKeyResolution:
     Connection even though real chat works."""
 
     def _fake(self, cfg, api_key_text, provider_name="anthropic"):
-        idx = get_provider_names().index(provider_name)
         fake = MagicMock()
         fake._cfg = cfg
-        fake.provider_combo.currentIndex.return_value = idx
-        fake.base_url_edit.text.return_value = "http://example/v1"
-        fake.api_key_edit.text.return_value = api_key_text
-        fake.model_edit.text.return_value = "some-model"
-        fake._read_model_params_table.return_value = {}
+        fake.provider_section.current_profile.return_value = ProviderConfig(
+            name=provider_name, base_url="http://example/v1",
+            api_key=api_key_text, model="some-model")
+        fake.provider_section.current_label.return_value = "cloud"
         fake.thinking_combo.currentIndex.return_value = 0
         return fake
 
@@ -791,17 +693,18 @@ def _selector_fake(cfg, label="cloud"):
         model_edit=_Edit(),
         provider_combo=_Combo(get_provider_names().index("anthropic")),
         utility_combos={},
+        profileShown=_Sig(),
+        aboutToCommit=_Sig(),
+        presetApplied=_Sig(),
     )
-    fake._load_model_params_table = lambda model, cfg=None, profile=None: None
-    fake._read_model_params_table = lambda: {}
     fake._commit_profile_fields = (
-        lambda: SettingsDialog._commit_profile_fields(fake))
-    fake._show_profile = lambda lbl: SettingsDialog._show_profile(fake, lbl)
+        lambda: ProviderSection._commit_profile_fields(fake))
+    fake._show_profile = lambda lbl: ProviderSection._show_profile(fake, lbl)
     fake._refresh_profile_combo = (
-        lambda: SettingsDialog._refresh_profile_combo(fake))
+        lambda: ProviderSection._refresh_profile_combo(fake))
     fake._refresh_utility_combos = lambda: None
     fake._rename_profile = (
-        lambda old, new: SettingsDialog._rename_profile(fake, old, new))
+        lambda old, new: ProviderSection._rename_profile(fake, old, new))
     fake._update_vision_ui = lambda profile: None
     return fake
 
@@ -812,7 +715,7 @@ class TestBrowsingDoesNotMoveActive:
         fake = _selector_fake(cfg)
         fake.profile_combo.addItem("local", "local")
 
-        SettingsDialog._on_profile_changed(fake, 0)
+        ProviderSection._on_profile_changed(fake, 0)
 
         assert fake._current_profile_label == "local"
         assert fake._active_profile == "cloud"
@@ -821,7 +724,7 @@ class TestBrowsingDoesNotMoveActive:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._on_profile_add(fake)
+        ProviderSection._on_profile_add(fake)
 
         assert fake._active_profile == "cloud"
         assert fake._current_profile_label not in ("cloud", "local")
@@ -833,7 +736,7 @@ class TestBrowsingDoesNotMoveActive:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._on_profile_add(fake)
+        ProviderSection._on_profile_add(fake)
 
         assert fake.profile_combo.currentData() == fake._current_profile_label
 
@@ -841,10 +744,10 @@ class TestBrowsingDoesNotMoveActive:
         cfg = _cfg()
         fake = _selector_fake(cfg, label="local")
         monkeypatch.setattr(
-            "freecad_ai.ui.settings_dialog.QInputDialog",
+            "freecad_ai.ui.provider_section.QInputDialog",
             types.SimpleNamespace(getText=lambda *a, **k: ("cheap", True)))
 
-        SettingsDialog._on_profile_rename(fake)
+        ProviderSection._on_profile_rename(fake)
 
         assert fake._active_profile == "cloud"
         assert fake.profile_combo.currentData() == "cheap"
@@ -857,7 +760,7 @@ class TestActiveProfileCheckbox:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._show_profile(fake, "cloud")
+        ProviderSection._show_profile(fake, "cloud")
 
         assert fake.profile_active_check.isChecked() is True
         assert fake.profile_active_check.isEnabled() is False
@@ -867,7 +770,7 @@ class TestActiveProfileCheckbox:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._show_profile(fake, "local")
+        ProviderSection._show_profile(fake, "local")
 
         assert fake.profile_active_check.isChecked() is False
         assert fake.profile_active_check.isEnabled() is True
@@ -876,7 +779,7 @@ class TestActiveProfileCheckbox:
         cfg = _cfg()
         fake = _selector_fake(cfg, label="local")
 
-        SettingsDialog._on_profile_active_toggled(fake, True)
+        ProviderSection._on_profile_active_toggled(fake, True)
 
         assert fake._active_profile == "local"
         assert fake.profile_active_check.isEnabled() is False
@@ -885,7 +788,7 @@ class TestActiveProfileCheckbox:
         cfg = _cfg()
         fake = _selector_fake(cfg, label="local")
 
-        SettingsDialog._on_profile_active_toggled(fake, True)
+        ProviderSection._on_profile_active_toggled(fake, True)
 
         assert fake.profile_combo.texts() == ["cloud", "local (active)"]
 
@@ -896,7 +799,7 @@ class TestActiveProfileCheckbox:
         cfg = _cfg()
         fake = _selector_fake(cfg, label="local")
 
-        SettingsDialog._on_profile_active_toggled(fake, False)
+        ProviderSection._on_profile_active_toggled(fake, False)
 
         assert fake._active_profile == "cloud"
 
@@ -906,7 +809,7 @@ class TestProfileComboRendering:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._refresh_profile_combo(fake)
+        ProviderSection._refresh_profile_combo(fake)
 
         assert fake.profile_combo.texts() == ["cloud (active)", "local"]
 
@@ -915,7 +818,7 @@ class TestProfileComboRendering:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._refresh_profile_combo(fake)
+        ProviderSection._refresh_profile_combo(fake)
 
         assert fake.profile_combo.data() == ["cloud", "local"]
         assert fake.profile_combo.findData("cloud") == 0
@@ -924,7 +827,7 @@ class TestProfileComboRendering:
         cfg = _cfg()
         fake = _selector_fake(cfg, label="local")
 
-        SettingsDialog._refresh_profile_combo(fake)
+        ProviderSection._refresh_profile_combo(fake)
 
         assert fake.profile_combo.currentData() == "local"
 
@@ -934,7 +837,7 @@ class TestProfileComboRendering:
         cfg = _cfg()
         fake = _selector_fake(cfg, label="deleted")
 
-        SettingsDialog._refresh_profile_combo(fake)
+        ProviderSection._refresh_profile_combo(fake)
 
         assert fake.profile_combo.currentData() == "cloud"
 
@@ -943,7 +846,7 @@ class TestProfileComboRendering:
         fake = _selector_fake(cfg, label="deleted")
         fake._active_profile = "also-gone"
 
-        SettingsDialog._refresh_profile_combo(fake)
+        ProviderSection._refresh_profile_combo(fake)
 
         assert fake.profile_combo.currentIndex() == 0
 
@@ -951,6 +854,6 @@ class TestProfileComboRendering:
         cfg = _cfg()
         fake = _selector_fake(cfg)
 
-        SettingsDialog._refresh_profile_combo(fake)
+        ProviderSection._refresh_profile_combo(fake)
 
         assert fake.profile_combo.blocked == [True, False]

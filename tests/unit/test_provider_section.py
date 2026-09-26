@@ -80,6 +80,14 @@ class TestRoundTrip:
         section.commit()
         assert cfg.profiles["cloud"].base_url != "http://elsewhere/v1"
 
+    def test_mutating_the_working_copy_leaves_cfg_alone(self, section):
+        """A shallow dict(cfg.profiles) would share the ProviderConfig
+        objects, editing cfg through the back door. Pins the deepcopy."""
+        cfg = _cfg()
+        section.load(cfg)
+        section.profiles()["local"].base_url = "http://mutated:9999/v1"
+        assert cfg.profiles["local"].base_url != "http://mutated:9999/v1"
+
     def test_apply_does_not_alias_the_scratch_copy(self, section):
         section.load(_cfg())
         out = AppConfig()
@@ -219,6 +227,15 @@ class TestProbeResult:
     def test_an_unknown_label_is_ignored(self, section):
         section.load(_cfg())
         section.set_probe_result("gone", vision=True)
+
+    def test_it_stays_out_of_the_config_until_apply(self, section):
+        """A probe result lands in the section's working copy, like every
+        other profile field, and reaches the real config on OK."""
+        cfg = _cfg()
+        section.load(cfg)
+        section.set_probe_result("local", vision=True)
+        assert section.profiles()["local"].vision_detected is True
+        assert cfg.profiles["local"].vision_detected is None
 
     def test_the_vision_row_refreshes_for_the_shown_profile(self, section):
         cfg = _cfg()

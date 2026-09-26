@@ -14,8 +14,6 @@ embedding model on any profile silently stopped sending tools altogether.
 These pin the flags to the profile they were detected on.
 """
 
-import copy
-
 import pytest
 
 from freecad_ai.config import AppConfig, ProviderConfig
@@ -158,7 +156,11 @@ pytestmark_qt = pytest.mark.skipif(
 
 
 def _fake_dialog(cfg, shown="chat"):
-    """A fake self carrying only what the methods under test touch."""
+    """A fake self carrying only what the methods under test touch.
+
+    Serves both sides of the #99 split: ProviderSection's profile methods
+    read the widgets below, and the dialog's probe handlers reach the
+    section through the auto-created ``fake.provider_section``."""
     from unittest import mock
     fake = mock.MagicMock()
     fake._cfg = cfg
@@ -170,17 +172,17 @@ def _fake_dialog(cfg, shown="chat"):
     fake.base_url_edit.text.return_value = prof.base_url
     fake.api_key_edit.text.return_value = prof.api_key
     fake.model_edit.text.return_value = prof.model
-    fake._read_model_params_table.return_value = dict(prof.params)
-    # Real method, not a MagicMock stand-in — it is code under test.
-    from freecad_ai.ui.settings_dialog import SettingsDialog
-    fake._probed_profile = lambda: SettingsDialog._probed_profile(fake)
     return fake
 
 
 @pytestmark_qt
 class TestProbesWriteToTheProbedProfile:
     """The user's report: creating a reranker profile and pressing Test
-    Connection on it rewrote the *chat* model's vision flag."""
+    Connection on it rewrote the *chat* model's vision flag.
+
+    The dialog hands each answer to the section, labelled with the profile
+    captured at probe start; what lands on which profile is the section's
+    job (TestProbeResult in test_provider_section.py)."""
 
     def test_vision_probe_writes_to_the_probed_profile(self):
         from freecad_ai.ui.settings_dialog import SettingsDialog
@@ -190,8 +192,8 @@ class TestProbesWriteToTheProbedProfile:
 
         SettingsDialog._on_vision_probed(fake, True)
 
-        assert cfg.profiles["rerank"].vision_detected is True
-        assert cfg.profiles["chat"].vision_detected is None
+        fake.provider_section.set_probe_result.assert_called_once_with(
+            "rerank", vision=True)
 
     def test_capability_probe_writes_to_the_probed_profile(self):
         from freecad_ai.ui.settings_dialog import SettingsDialog
@@ -202,25 +204,21 @@ class TestProbesWriteToTheProbedProfile:
         SettingsDialog._on_capabilities_detected(
             fake, {"vision": False, "tools": False, "thinking": True})
 
-        assert cfg.profiles["rerank"].tools_detected is False
-        assert cfg.profiles["rerank"].thinking_detected is True
-        assert cfg.profiles["chat"].tools_detected is None
-        assert cfg.profiles["chat"].thinking_detected is None
+        fake.provider_section.set_probe_result.assert_called_once_with(
+            "rerank", tools=False, thinking=True)
 
-    def test_probe_results_do_not_touch_the_live_config(self):
-        """They land in the dialog's working copy, like every other
-        profile field, and reach the real config on OK."""
+    def test_a_non_ollama_probe_reports_no_tools_or_thinking(self):
+        """Non-Ollama providers emit only "vision": tools/thinking must
+        stay unreported (None), not become False."""
         from freecad_ai.ui.settings_dialog import SettingsDialog
         cfg = _two_profiles()
-        working = copy.deepcopy(cfg.profiles)
         fake = _fake_dialog(cfg, shown="rerank")
-        fake._profiles = working
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_vision_probed(fake, True)
+        SettingsDialog._on_capabilities_detected(fake, {"vision": True})
 
-        assert working["rerank"].vision_detected is True
-        assert cfg.profiles["rerank"].vision_detected is None
+        fake.provider_section.set_probe_result.assert_called_once_with(
+            "rerank")
 
 
 @pytestmark_qt
@@ -229,7 +227,7 @@ class TestStaleDetectionIsClearedPerProfile:
     answer is about something else."""
 
     def test_changing_the_model_clears_that_profiles_detection(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         cfg.profiles["chat"].vision_detected = True
         cfg.profiles["chat"].tools_detected = True
@@ -237,7 +235,7 @@ class TestStaleDetectionIsClearedPerProfile:
         fake = _fake_dialog(cfg, shown="chat")
         fake.model_edit.text.return_value = "some-other-model"
 
-        SettingsDialog._commit_profile_fields(fake)
+        ProviderSection._commit_profile_fields(fake)
 
         prof = cfg.profiles["chat"]
         assert prof.model == "some-other-model"
@@ -246,19 +244,19 @@ class TestStaleDetectionIsClearedPerProfile:
         assert prof.thinking_detected is None
 
     def test_unchanged_model_keeps_the_detection(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         cfg.profiles["chat"].vision_detected = True
         cfg.profiles["chat"].tools_detected = False
         fake = _fake_dialog(cfg, shown="chat")
 
-        SettingsDialog._commit_profile_fields(fake)
+        ProviderSection._commit_profile_fields(fake)
 
         assert cfg.profiles["chat"].vision_detected is True
         assert cfg.profiles["chat"].tools_detected is False
 
     def test_changing_the_provider_clears_that_profiles_detection(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.provider_section import ProviderSection
         from freecad_ai.llm.providers import get_provider_names
         cfg = _two_profiles()
         cfg.profiles["chat"].vision_detected = True
@@ -266,19 +264,19 @@ class TestStaleDetectionIsClearedPerProfile:
         names = get_provider_names()
         fake.provider_combo.currentIndex.return_value = names.index("anthropic")
 
-        SettingsDialog._commit_profile_fields(fake)
+        ProviderSection._commit_profile_fields(fake)
 
         assert cfg.profiles["chat"].name == "anthropic"
         assert cfg.profiles["chat"].vision_detected is None
 
     def test_the_other_profiles_detection_is_untouched(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         cfg.profiles["rerank"].vision_detected = False
         fake = _fake_dialog(cfg, shown="chat")
         fake.model_edit.text.return_value = "some-other-model"
 
-        SettingsDialog._commit_profile_fields(fake)
+        ProviderSection._commit_profile_fields(fake)
 
         assert cfg.profiles["rerank"].vision_detected is False
 
@@ -286,22 +284,22 @@ class TestStaleDetectionIsClearedPerProfile:
 @pytestmark_qt
 class TestVisionOverrideIsAProfileField:
     def test_commit_writes_the_override_into_the_shown_profile(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         fake = _fake_dialog(cfg, shown="rerank")
         fake._vision_override_value = True
 
-        SettingsDialog._commit_profile_fields(fake)
+        ProviderSection._commit_profile_fields(fake)
 
         assert cfg.profiles["rerank"].vision_override is True
         assert cfg.profiles["chat"].vision_override is None
 
     def test_showing_a_profile_renders_its_own_flags(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         cfg.profiles["rerank"].vision_detected = False
         fake = _fake_dialog(cfg, shown="chat")
 
-        SettingsDialog._show_profile(fake, "rerank")
+        ProviderSection._show_profile(fake, "rerank")
 
         fake._update_vision_ui.assert_called_once_with(cfg.profiles["rerank"])

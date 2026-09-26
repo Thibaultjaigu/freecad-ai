@@ -157,14 +157,12 @@ class TestTestRerankerProbeMatchesCreateClient:
             "freecad_ai.ui.settings_dialog._TestRerankerThread",
             _CapturingThread)
 
-        combo = mock.MagicMock()
-        combo.currentData.return_value = rerank_selection
-
         fake = mock.MagicMock()
         fake._cfg = cfg
-        fake._profiles = cfg.profiles
-        fake._active_profile = cfg.active_profile
-        fake.utility_combos = {"rerank": combo}
+        fake.provider_section.profiles.return_value = cfg.profiles
+        fake.provider_section.active_label.return_value = cfg.active_profile
+        fake.provider_section.utility_selection.return_value = \
+            rerank_selection
 
         SettingsDialog._test_reranker(fake)
         return captured

@@ -57,12 +57,12 @@ def _cfg():
 def _fake(cfg):
     fake = MagicMock()
     fake._cfg = cfg
-    fake._current_profile_label = "cloud"
-    fake.provider_combo.currentIndex.return_value = 0
-    fake.base_url_edit.text.return_value = "https://api.anthropic.com"
-    fake.api_key_edit.text.return_value = "typed-key"
-    fake.model_edit.text.return_value = "claude-sonnet-4-6"
-    fake._read_model_params_table.return_value = {}
+    # The section's own copy of the shown profile, not cfg's: committing
+    # into it is the only write Test Connection may make (#76, #99).
+    fake.provider_section.current_label.return_value = "cloud"
+    fake.provider_section.current_profile.return_value = ProviderConfig(
+        name="anthropic", base_url="https://api.anthropic.com",
+        api_key="typed-key", model="claude-sonnet-4-6")
     fake.max_tokens_spin.value.return_value = EDITED_MAX_TOKENS
     fake.context_window_spin.value.return_value = EDITED_CONTEXT_WINDOW
     fake.max_tool_turns_spin.value.return_value = EDITED_MAX_TOOL_TURNS
@@ -162,6 +162,26 @@ class TestTheProbeStillUsesTheEditedValues:
         cfg.temperature = 0.42
         captured = _run(monkeypatch, cfg)
         assert captured["temperature"] == 0.42
+
+
+class TestTheProbeCommitsTheSectionFirst:
+    """#99: the probe reads the committed profile, so the visible fields
+    have to be committed into it before it is read."""
+
+    def test_commit_comes_before_the_profile_is_read(self, monkeypatch):
+        cfg = _cfg()
+        fake = _fake(cfg)
+        order = []
+        prof = fake.provider_section.current_profile.return_value
+        fake.provider_section.commit.side_effect = (
+            lambda: order.append("commit"))
+        fake.provider_section.current_profile.side_effect = (
+            lambda: order.append("read") or prof)
+        monkeypatch.setattr(
+            "freecad_ai.ui.settings_dialog._TestConnectionThread",
+            lambda *a, **k: MagicMock())
+        SettingsDialog._test_connection(fake)
+        assert order[:2] == ["commit", "read"]
 
 
 class TestTheStagingHelperIsGone:

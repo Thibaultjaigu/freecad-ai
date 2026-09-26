@@ -1,11 +1,12 @@
-"""Regression tests for SettingsDialog._on_provider_changed.
+"""Regression tests for a provider switch: ProviderSection._on_provider_changed
+and the dialog's half of it, SettingsDialog._on_preset_applied (#99).
 
 Issue #12 (xtc0r): switching the provider combo to "custom" was wiping the
 user's gateway URL and model, because the "custom" preset ships empty
 strings and the dialog applied them unconditionally. After v0.14.3 the
 dialog only overwrites a field when the preset has a concrete value.
 
-These tests exercise the method via the unbound-method-with-fake-self
+These tests exercise the methods via the unbound-method-with-fake-self
 pattern — no QApplication required.
 """
 
@@ -32,28 +33,46 @@ from freecad_ai.config import (  # noqa: E402
     ProviderConfig,
 )
 from freecad_ai.llm.providers import get_provider_names  # noqa: E402
+from freecad_ai.ui.provider_section import ProviderSection  # noqa: E402
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
 
 
-def _make_fake_dialog(base_url="http://gateway.example/v1", model="my-model",
-                     profile=None):
-    """Build a fake dialog with just the attributes _on_provider_changed touches."""
+class _Sig:
+    """Stand-in for a Qt signal on a fake self."""
+    def __init__(self):
+        self.calls = []
+
+    def emit(self, *args):
+        self.calls.append(args)
+
+
+def _make_fake_section(base_url="http://gateway.example/v1", model="my-model"):
+    """Build a fake section with just the attributes _on_provider_changed touches."""
     base_url_edit = MagicMock()
     base_url_edit.text.return_value = base_url
     model_edit = MagicMock()
     model_edit.text.return_value = model
-    cfg = AppConfig()
-    profiles = {"p": profile} if profile is not None else {}
     return SimpleNamespace(
         base_url_edit=base_url_edit,
         model_edit=model_edit,
-        _cfg=cfg,
-        _profiles=profiles,
-        _current_profile_label="p",
-        _load_model_params_table=MagicMock(),
-        _rerank_at_factory_defaults=MagicMock(return_value=False),
-        _apply_rerank_defaults=MagicMock(),
+        profileShown=_Sig(),
+        aboutToCommit=_Sig(),
+        presetApplied=_Sig(),
         _commit_profile_fields=MagicMock(),
+    )
+
+
+def _make_fake_dialog(model="my-model", profile=None, rerank_untouched=False):
+    """Build a fake dialog with just the attributes _on_preset_applied touches."""
+    section = MagicMock()
+    section.model_edit.text.return_value = model
+    section.current_profile.return_value = profile
+    return SimpleNamespace(
+        provider_section=section,
+        _cfg=AppConfig(),
+        _load_model_params_table=MagicMock(),
+        _rerank_at_factory_defaults=MagicMock(return_value=rerank_untouched),
+        _apply_rerank_defaults=MagicMock(),
     )
 
 
@@ -62,13 +81,21 @@ def test_switch_to_custom_preserves_fields():
     assert PROVIDER_PRESETS["custom"]["base_url"] == ""
     assert PROVIDER_PRESETS["custom"]["default_model"] == ""
 
-    fake = _make_fake_dialog()
+    fake = _make_fake_section()
     custom_idx = get_provider_names().index("custom")
-    SettingsDialog._on_provider_changed(cast(SettingsDialog, fake), custom_idx)
+    ProviderSection._on_provider_changed(cast(ProviderSection, fake), custom_idx)
 
     fake.base_url_edit.setText.assert_not_called()
     fake.model_edit.setText.assert_not_called()
-    # _load_model_params_table is called with whatever's in the field, not "".
+    assert fake.presetApplied.calls == [(PROVIDER_PRESETS["custom"],)]
+
+
+def test_preset_applied_reloads_the_table_for_the_field_model():
+    """_load_model_params_table is called with whatever's in the field, not ""."""
+    fake = _make_fake_dialog(model="my-model")
+    SettingsDialog._on_preset_applied(
+        cast(SettingsDialog, fake), PROVIDER_PRESETS["custom"])
+
     fake._load_model_params_table.assert_called_once()
     args, _ = fake._load_model_params_table.call_args
     assert args[0] == "my-model"
@@ -76,9 +103,9 @@ def test_switch_to_custom_preserves_fields():
 
 def test_switch_to_real_provider_applies_preset():
     """Anthropic (or any non-custom provider) overwrites fields as before."""
-    fake = _make_fake_dialog()
+    fake = _make_fake_section()
     anthropic_idx = get_provider_names().index("anthropic")
-    SettingsDialog._on_provider_changed(cast(SettingsDialog, fake), anthropic_idx)
+    ProviderSection._on_provider_changed(cast(ProviderSection, fake), anthropic_idx)
 
     fake.base_url_edit.setText.assert_called_once_with(
         PROVIDER_PRESETS["anthropic"]["base_url"])
@@ -87,13 +114,15 @@ def test_switch_to_real_provider_applies_preset():
 
 
 def test_invalid_index_is_noop():
-    """Out-of-range index leaves all widgets untouched."""
-    fake = _make_fake_dialog()
-    SettingsDialog._on_provider_changed(cast(SettingsDialog, fake),-1)
-    SettingsDialog._on_provider_changed(cast(SettingsDialog, fake),9999)
+    """Out-of-range index leaves all widgets untouched, and the dialog is
+    never told to reload its table."""
+    fake = _make_fake_section()
+    ProviderSection._on_provider_changed(cast(ProviderSection, fake), -1)
+    ProviderSection._on_provider_changed(cast(ProviderSection, fake), 9999)
     fake.base_url_edit.setText.assert_not_called()
     fake.model_edit.setText.assert_not_called()
-    fake._load_model_params_table.assert_not_called()
+    assert fake.presetApplied.calls == []
+    fake._commit_profile_fields.assert_not_called()
 
 
 def test_params_table_reload_gets_the_working_copy_profile():
@@ -104,9 +133,24 @@ def test_params_table_reload_gets_the_working_copy_profile():
     profile = ProviderConfig(name="ollama", model="qwen3:8b",
                              params={"top_k": 40})
     fake = _make_fake_dialog(profile=profile)
-    SettingsDialog._on_provider_changed(
-        cast(SettingsDialog, fake), get_provider_names().index("anthropic"))
+    SettingsDialog._on_preset_applied(
+        cast(SettingsDialog, fake), PROVIDER_PRESETS["anthropic"])
 
     args, kwargs = fake._load_model_params_table.call_args
     assert args[1] is fake._cfg
     assert args[2] is profile
+
+
+def test_a_touched_reranker_keeps_the_users_choice():
+    """default_rerank (#10) applies only while the reranker UI is at its
+    factory defaults."""
+    fake = _make_fake_dialog(rerank_untouched=False)
+    SettingsDialog._on_preset_applied(
+        cast(SettingsDialog, fake), PROVIDER_PRESETS["github"])
+    fake._apply_rerank_defaults.assert_not_called()
+
+    fake = _make_fake_dialog(rerank_untouched=True)
+    SettingsDialog._on_preset_applied(
+        cast(SettingsDialog, fake), PROVIDER_PRESETS["github"])
+    fake._apply_rerank_defaults.assert_called_once_with(
+        PROVIDER_PRESETS["github"]["default_rerank"])
