@@ -943,10 +943,17 @@ _LEGACY_PARAM_THINKING = ("off", "on", "extended")
 
 
 def _get_param_group():
-    """Return the FreeCAD ParamGet group, or None when running outside FreeCAD."""
+    """Return the legacy ParamGet group, or None when absent or outside FreeCAD.
+
+    ParamGet creates a missing group, and FreeCAD writes it to user.cfg at
+    exit -- so HasGroup first, or every start resurrects the retired store.
+    """
     try:
         import FreeCAD
-        return FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/FreeCADAI")
+        mod = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod")
+        if not mod.HasGroup("FreeCADAI"):
+            return None
+        return mod.GetGroup("FreeCADAI")
     except (ImportError, RuntimeError):
         return None
 
@@ -1013,6 +1020,9 @@ def _migrate_param_store(cfg: AppConfig) -> None:
             "FreeCAD AI: could not save preferences migrated from FreeCAD's "
             "parameter store (%s); will retry at next start", e)
         return
+    # RemGroup only detaches a group a Python handle still holds, and the
+    # next save writes it back -- so release ours first.
+    del group
     _remove_param_group()
 
 

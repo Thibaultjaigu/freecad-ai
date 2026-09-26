@@ -511,6 +511,46 @@ class TestParamStoreMigration:
         config_mod._remove_param_group()
         assert calls == [("RemGroup", "FreeCADAI"), ("saveParameter",)]
 
+    def test_group_handle_is_released_before_removal(
+            self, tmp_config_dir, monkeypatch):
+        """FreeCAD's RemGroup only detaches a group a Python handle still
+        holds; the next save writes it back (found by the live probe)."""
+        import gc
+        import weakref
+        refs = []
+
+        def fresh_group():
+            group = self._group(strings={"Model": "m"})
+            refs.append(weakref.ref(group))
+            return group
+
+        alive_at_removal = []
+        monkeypatch.setattr(config_mod, "_get_param_group", fresh_group)
+        monkeypatch.setattr(
+            config_mod, "_remove_param_group",
+            lambda: (gc.collect(), alive_at_removal.append(refs[0]() is not None)))
+        config_mod.load_config()
+        assert alive_at_removal == [False]
+
+    def test_missing_group_is_not_recreated(self, monkeypatch):
+        """ParamGet creates a missing group, and FreeCAD writes it back to
+        user.cfg at exit -- so every start would resurrect the retired
+        store as an empty stub (found by the live probe on 1.1.1)."""
+        paths = []
+
+        class _FakeModGroup:
+            def HasGroup(_self, name):
+                return False
+
+        class _FakeFreeCAD:
+            def ParamGet(_self, path):
+                paths.append(path)
+                return _FakeModGroup()
+
+        monkeypatch.setitem(sys.modules, "FreeCAD", _FakeFreeCAD())
+        assert config_mod._get_param_group() is None
+        assert paths == ["User parameter:BaseApp/Preferences/Mod"]
+
 
 class TestConfigDirResolution:
     """Migration of config dir for issue #9.
