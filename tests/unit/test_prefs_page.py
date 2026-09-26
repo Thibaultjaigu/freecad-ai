@@ -91,6 +91,45 @@ class TestUntouched:
         assert page.mode_combo.currentIndex() == 1          # act
         assert page.max_tokens_spin.value() == 65536
 
+    def test_a_never_loaded_page_writes_nothing(self, qapp, cfg, notified):
+        """Fix round 1: no successful load means nothing to compare
+        against, so a page FreeCAD never loaded (or whose loadSettings()
+        raised partway) must not fall back to writing the widgets' own
+        defaults over the saved config."""
+        from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage
+        before = _disk()
+        p = FreeCADAIPrefsPage()
+        p.saveSettings()
+        assert _disk() == before
+        assert notified == []
+        p.form.deleteLater()
+
+    @pytest.mark.parametrize("field,value", [
+        ("max_tokens", 100),
+        ("max_tokens", 1000000),
+        ("mode", "weird"),
+        ("thinking", "max"),
+    ])
+    def test_an_unshowable_value_survives_an_unrelated_save(
+            self, qapp, cfg, notified, field, value):
+        """The spin box and combos can only display values in their own
+        range. _load's comment claims such a value is written back only
+        if the user changes that field, never as a side effect of an
+        unrelated edit."""
+        setattr(cfg, field, value)
+        config_mod.save_current_config()
+        from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage
+        p = FreeCADAIPrefsPage()
+        p.loadSettings()
+        before = _disk()
+        p.saveSettings()
+        assert _disk() == before
+
+        p.section.model_edit.setText("m-edited")
+        p.saveSettings()
+        assert getattr(config_mod.get_config(), field) == value
+        p.form.deleteLater()
+
 
 class TestSaving:
     def test_an_edit_is_saved_and_notified(self, page, notified):

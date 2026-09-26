@@ -72,7 +72,9 @@ class FreeCADAIPrefsPage:
         layout.addWidget(hint)
         layout.addStretch()
 
-        self._behavior_baseline = {}
+        # None, not {}: saveSettings() treats None as "no successful load
+        # to compare against" and writes nothing (fix round 1, #99).
+        self._behavior_baseline = None
 
     def loadSettings(self):  # noqa: N802 — FreeCAD's name
         self._load(label=None)
@@ -100,6 +102,9 @@ class FreeCADAIPrefsPage:
         }
 
     def saveSettings(self):  # noqa: N802 — FreeCAD's name
+        # No successful load → nothing to compare against → write nothing.
+        if self._behavior_baseline is None:
+            return
         changed = {key: value
                    for key, value in self._behavior_values().items()
                    if self._behavior_baseline.get(key) != value}
