@@ -65,6 +65,18 @@ def test_untouched_load_writes_nothing(page):
     assert page.is_dirty() is False
 
 
+def test_an_unedited_fallback_preview_is_not_promoted_into_the_profile(page):
+    """A profile with no params shows the global temperature as a preview
+    of what resolve_params() will send. Never touching that preview must
+    not turn it into an explicit override — Save with nothing edited has
+    to leave a params-less profile params-less (#101)."""
+    page.load(_cfg(), label="local")
+    assert page.is_dirty() is False
+    target = _cfg()
+    page.apply_to(target)
+    assert target.profiles["local"].params == {}
+
+
 def test_a_param_edit_reaches_the_profile_and_the_temperature(page):
     page.load(_cfg())
     page.model_params_table.item(0, 1).setText("0.7")

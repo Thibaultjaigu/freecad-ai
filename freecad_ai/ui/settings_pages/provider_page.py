@@ -185,6 +185,12 @@ class ProviderPage(SettingsPage):
         super().__init__(parent)
         self._last_model_name = ""  # track model name for param save/load
         self._cfg = None
+        # What the table showed right after the last load — which, for a
+        # profile with no params of its own, is a *preview* of what
+        # resolve_params() would send (provider defaults or the global
+        # temperature), not the profile's own state. Comparing against it
+        # is how commit tells an actual edit from that unedited preview.
+        self._loaded_params = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -318,12 +324,19 @@ class ProviderPage(SettingsPage):
     def _on_about_to_commit(self, prof):
         """The section is committing a profile: the table is its params.
 
-        A straight write-back, so a removed row is a removed parameter. Do
-        not reintroduce a merge with cfg.model_params here: that shared
-        layer is legacy and unread, and layering it back in would make
-        Remove a no-op again.
+        A straight write-back when the table has actually changed since it
+        was loaded, so a removed row is a removed parameter. Do not
+        reintroduce a merge with cfg.model_params here: that shared layer
+        is legacy and unread, and layering it back in would make Remove a
+        no-op again. When nothing changed, leave prof.params alone — for a
+        profile with none of its own, the table was only ever previewing
+        provider defaults or the global temperature, and committing that
+        untouched preview would silently promote it into an explicit
+        per-profile override.
         """
-        prof.params = self._read_model_params_table()
+        current = self._read_model_params_table()
+        if current != self._loaded_params:
+            prof.params = current
 
     def _on_preset_applied(self, preset):
         """A user provider switch: reload the params table from the working copy.
@@ -347,7 +360,7 @@ class ProviderPage(SettingsPage):
         prof = self.section.current_profile()
         if self._last_model_name and prof is not None:
             params = self._read_model_params_table()
-            if params:
+            if params != self._loaded_params:
                 prof.params = params
         self._load_model_params_table(new_model, self._cfg, prof)
 
@@ -377,6 +390,7 @@ class ProviderPage(SettingsPage):
             params = {"temperature": cfg.temperature}
 
         self._last_model_name = model_name
+        self._loaded_params = params
         self._populate_model_params_table(params)
 
     def _populate_model_params_table(self, params: dict):
