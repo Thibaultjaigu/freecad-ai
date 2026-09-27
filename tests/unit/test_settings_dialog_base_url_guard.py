@@ -104,11 +104,10 @@ class TestSaveIsWiredToTheGuard:
 
     def _fake(self, allowed):
         return types.SimpleNamespace(
-            provider_section=MagicMock(),
-            # _save writes profiles through provider_page.apply_to (#101),
-            # never provider_section.apply_to directly; the other three
-            # pages are here so a broken guard (allowed=True) reaches them
-            # without an unrelated AttributeError masking the real failure.
+            # _save commits and writes profiles through provider_page.section
+            # / provider_page.apply_to (#101); the other three pages are here
+            # so a broken guard (allowed=True) reaches them without an
+            # unrelated AttributeError masking the real failure.
             provider_page=MagicMock(),
             behavior_page=MagicMock(),
             mcp_page=MagicMock(),
@@ -138,7 +137,7 @@ class TestSaveIsWiredToTheGuard:
         with mock.patch("freecad_ai.ui.settings_dialog.get_config",
                         return_value=cfg):
             SettingsDialog._save(fake)
-        fake.provider_section.commit.assert_called_once()
+        fake.provider_page.section.commit.assert_called_once()
 
 
 class TestFindsPlaceholderBaseUrls:

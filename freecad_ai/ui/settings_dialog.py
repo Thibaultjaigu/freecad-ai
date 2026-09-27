@@ -1,34 +1,24 @@
-"""Settings dialog for FreeCAD AI.
+"""The workbench's Settings dialog (gear button, FreeCADAI_OpenSettings).
 
-Provides a GUI for configuring:
-  - LLM provider (Anthropic, OpenAI, Ollama, Gemini, OpenRouter, Moonshot,
-    DeepSeek, Qwen, Groq, Mistral, Together, Fireworks, xAI, Cohere,
-    SambaNova, MiniMax, Custom)
-  - API key, base URL, model name
-  - Max tokens, temperature
-  - Auto-execute toggle
-  - User extension tools
-  - Test connection button
+A frame around the four settings pages that Edit → Preferences → FreeCAD
+AI also shows (#101): it stacks them in one scroll area and adds OK/Cancel
+plus the one thing only a dialog can do, vetoing OK on a profile that
+cannot work. The pages own every field; OK writes only what changed.
 """
 
-from .compat import QtWidgets, QtGui
+from .compat import QtWidgets
 from ..i18n import translate
 
 QDialog = QtWidgets.QDialog
-QWidget = QtWidgets.QWidget
 QVBoxLayout = QtWidgets.QVBoxLayout
 QHBoxLayout = QtWidgets.QHBoxLayout
 QPushButton = QtWidgets.QPushButton
-QDoubleValidator = QtGui.QDoubleValidator
 
 QMessageBox = QtWidgets.QMessageBox
 
 from ..config import get_config, notify_config_changed, save_current_config
 from .provider_section import ProviderSection
-from .settings_pages.behavior_page import BehaviorPage
-from .settings_pages.mcp_page import McpPage
-from .settings_pages.provider_page import ProviderPage
-from .settings_pages.tools_page import ToolsPage
+from .settings_pages import BehaviorPage, McpPage, ProviderPage, ToolsPage
 
 
 class SettingsDialog(QDialog):
@@ -87,7 +77,8 @@ class SettingsDialog(QDialog):
 
         self.tools_page = ToolsPage()
         layout.addWidget(self.tools_page)
-        self.tools_page.closeHostRequested.connect(self._on_close_requested)
+        self.tools_page.closeHostRequested.connect(
+            lambda save: self._on_close_requested(save))
 
         self.mcp_page = McpPage()
         layout.addWidget(self.mcp_page)
@@ -109,18 +100,14 @@ class SettingsDialog(QDialog):
 
         outer_layout.addLayout(btn_layout)
 
+    def _pages(self):
+        return (self.provider_page, self.behavior_page, self.tools_page,
+                self.mcp_page)
+
     def _load_from_config(self):
-        """Populate fields from the current config."""
-        cfg = self._cfg = get_config()
-
-        # Profile edits stay in the section's own copy until OK (see
-        # ProviderSection.load for why the live singleton must not see them).
-        self.provider_page.load(cfg)
-
-        self.behavior_page.load(cfg)
-
-        self.mcp_page.load(cfg)
-        self.tools_page.load(cfg)
+        cfg = get_config()
+        for page in self._pages():
+            page.load(cfg)
 
     @staticmethod
     def _profiles_missing_base_url(profiles) -> list:
@@ -180,36 +167,24 @@ class SettingsDialog(QDialog):
             self.reject()
 
     def _save(self):
-        """Save settings to config and close."""
-        cfg = get_config()
-
-        # Profile edits (add/rename/delete/field changes) have lived in the
-        # section's working copy since _load_from_config. OK is the only
-        # point where they land in the real config — commit the visible
-        # widgets into the currently-shown profile first. The working copy
-        # itself is written back near the end, via provider_page.apply_to(cfg),
-        # after the other pages below so its #10 factory-default check
-        # sees this save's own values.
-        section = self.provider_section
+        """OK: veto check, every page's changes, one save, one notify."""
+        # Commit the visible profile widgets first, so the veto sees the
+        # Base URL as typed.
+        section = self.provider_page.section
         section.commit()
         if not self._confirm_incomplete_profiles(section.profiles()):
             return
-
-        self.behavior_page.apply_to(cfg)
-        self.mcp_page.apply_to(cfg)
-        self.tools_page.apply_to(cfg)
-
-        # After the widget writes above, so the section's #10 factory-
-        # default check (in apply_to) sees this save's own rerank values.
-        self.provider_page.apply_to(cfg)
-
+        cfg = get_config()
+        # Provider last: its #10 reranker default applies only while the
+        # live config is still at factory defaults, so an explicit choice
+        # the Tools page just wrote wins.
+        for page in (self.behavior_page, self.tools_page, self.mcp_page,
+                     self.provider_page):
+            page.apply_to(cfg)
         save_current_config()
-
         # The chat panel (and anything else showing config-derived state)
         # refreshes from this, whichever window saved (#99).
         notify_config_changed()
-
-        self.behavior_page.after_save(cfg)
-
+        for page in self._pages():
+            page.after_save(cfg)
         self.accept()
-

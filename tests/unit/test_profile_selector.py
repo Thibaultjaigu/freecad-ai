@@ -404,22 +404,12 @@ class TestCancelDiscardsProfileEdits:
 
 
 def _fake_save_dialog():
-    """MagicMock fake for SettingsDialog._save. _save touches a lot of
-    unrelated widgets that only need to not raise; the profiles are the
-    section's business (TestRoundTrip in test_provider_section.py)."""
+    """MagicMock fake for SettingsDialog._save. _save now only orchestrates
+    the four pages, each MagicMocked here and covered by its own tests
+    (TestRoundTrip in test_provider_section.py, and each page's own test
+    module); this fake only needs to not raise."""
     fake = MagicMock()
-    fake._read_model_params_table = lambda: {}
-    fake._read_strip_thinking_state = lambda: None
-    fake._get_default_prompt_text = lambda: ""
-    fake._parse_server_address = lambda host, port: ("127.0.0.1", 8765)
-    fake._parse_allowed_hosts = lambda text: []
     fake.accept = lambda: None
-    fake.thinking_combo.currentIndex.return_value = 0
-    fake.viewport_capture_combo.currentIndex.return_value = 0
-    fake.viewport_resolution_combo.currentIndex.return_value = 0
-    fake.rerank_method_combo.currentIndex.return_value = 0
-    fake.system_prompt_edit.toPlainText.return_value = ""
-    fake.rerank_pinned_edit.text.return_value = ""
     return fake
 
 
@@ -436,9 +426,9 @@ class TestSaveHandsTheProfilesToTheSection:
         fake = _fake_save_dialog()
         fake._confirm_incomplete_profiles.return_value = True
         SettingsDialog._save(fake)
-        fake.provider_section.commit.assert_called_once_with()
+        fake.provider_page.section.commit.assert_called_once_with()
         fake._confirm_incomplete_profiles.assert_called_once_with(
-            fake.provider_section.profiles.return_value)
+            fake.provider_page.section.profiles.return_value)
         fake.provider_page.apply_to.assert_called_once_with(cfg)
 
     def test_commit_happens_before_the_confirmation_and_the_write(
@@ -450,7 +440,7 @@ class TestSaveHandsTheProfilesToTheSection:
             "freecad_ai.ui.settings_dialog.save_current_config", lambda: None)
         fake = _fake_save_dialog()
         order = []
-        fake.provider_section.commit.side_effect = (
+        fake.provider_page.section.commit.side_effect = (
             lambda: order.append("commit"))
         fake._confirm_incomplete_profiles.side_effect = (
             lambda profiles: order.append("confirm") or True)
@@ -478,6 +468,7 @@ class TestLoadHandsTheConfigToTheSection:
     def test_load_from_config_loads_the_section(self, monkeypatch):
         cfg = _cfg()
         fake = MagicMock()
+        fake._pages = lambda: SettingsDialog._pages(fake)
         monkeypatch.setattr(
             "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
 
@@ -609,6 +600,7 @@ class TestOnModelChangedDoesNotMutateLiveConfig:
             _cfg=cfg,
             _last_model_name=prof.model,
             section=section,
+            _loaded_params={},
         )
         fake._read_model_params_table = lambda: {"temperature": 0.42}
         fake._populate_model_params_table = lambda params: None
