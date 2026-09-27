@@ -4,6 +4,7 @@ connection probes (Test Connection, Test Reranker) (#101)."""
 from ..compat import QtWidgets, QtCore
 from ...i18n import translate
 from ...config import get_config, PROVIDER_PRESETS
+from ...llm.client import take_max_tokens_row
 from ..provider_section import ProviderSection
 from .base import SettingsPage
 
@@ -30,7 +31,8 @@ class _TestConnectionThread(QThread):
 
     max_tokens and thinking are the saved values: those widgets live on the
     Behavior page, and a probe reading another page's widgets would link
-    pages (#101). temperature is the saved value: the model-params table
+    pages (#101). A valid max_tokens row in the table on screen still wins
+    over the saved cap, as it does in create_client (#103). temperature is the saved value: the model-params table
     carries the dialog's own, and LLMClient lets it win over this fallback.
     """
     finished = Signal(bool, str)        # success, message
@@ -233,10 +235,11 @@ class ProviderPage(SettingsPage):
         model_params_group = QGroupBox(translate("SettingsDialog", "Model Parameters"))
         model_params_layout = QVBoxLayout()
 
-        # Freeform sampling parameters table (saved per model name)
+        # Freeform request parameters, saved per profile since #99. A
+        # max_tokens row is this profile's output cap (#103).
         model_params_layout.addWidget(QLabel(
             translate("SettingsDialog",
-                      "Sampling parameters sent with each request (saved per model):")
+                      "Parameters sent with each request (saved per profile):")
         ))
 
         self.model_params_table = QTableWidget(0, 2)
@@ -252,8 +255,9 @@ class ProviderPage(SettingsPage):
         self.model_params_table.setToolTip(
             translate("SettingsDialog",
                       "Parameters are merged into the API request body.\n"
-                      "Common: temperature, top_p, top_k, n,\n"
+                      "Common: temperature, top_p, top_k, n, max_tokens,\n"
                       "presence_penalty, frequency_penalty, repetition_penalty.\n"
+                      "max_tokens overrides Max Output Tokens for this profile.\n"
                       "Values are auto-detected as number or string.")
         )
         model_params_layout.addWidget(self.model_params_table)
@@ -581,6 +585,9 @@ class ProviderPage(SettingsPage):
             get_config().provider_keys.get(provider_name, "")
         model = profile.model
         model_params = dict(profile.params)
+        # Same rule as create_client (#103): a valid row is the cap, and the
+        # row itself never travels as a param.
+        row_cap = take_max_tokens_row(model_params, section.current_label())
 
         self.test_btn.setEnabled(False)
         self.busyChanged.emit(True)
@@ -593,7 +600,7 @@ class ProviderPage(SettingsPage):
 
         self._test_thread = _TestConnectionThread(
             provider_name, base_url, api_key, model, model_params,
-            max_tokens=get_config().max_tokens,
+            max_tokens=row_cap if row_cap is not None else get_config().max_tokens,
             # The params table supplies the dialog's own temperature and
             # outranks this inside LLMClient; cfg is only the fallback.
             temperature=get_config().temperature,
