@@ -88,6 +88,8 @@ class ProviderSection(QWidget):
         self._current_profile_label = None
         self._baseline = None
         self._pending_rerank = None
+        # The profile whose provider switch recorded _pending_rerank.
+        self._pending_rerank_label = None
         self._build_ui()
 
     def _build_ui(self):
@@ -226,6 +228,7 @@ class ProviderSection(QWidget):
         else the active one.
         """
         self._pending_rerank = None
+        self._pending_rerank_label = None
         self._profiles = copy.deepcopy(cfg.profiles)
         self._active_profile = cfg.active_profile
         self._utility_profiles = dict(cfg.utility_profiles)
@@ -252,6 +255,9 @@ class ProviderSection(QWidget):
         # indistinguishable from untouched, as it was when this check read
         # the widgets.
         pending, self._pending_rerank = self._pending_rerank, None
+        label, self._pending_rerank_label = self._pending_rerank_label, None
+        if label not in self._profiles:   # the switched profile was deleted
+            pending = None
         if (pending and cfg.rerank_method == "off"
                 and cfg.rerank_top_n == 15):
             if pending.get("method") in ("off", "keyword", "llm"):
@@ -350,6 +356,8 @@ class ProviderSection(QWidget):
         }
         if self._active_profile == old:
             self._active_profile = new
+        if self._pending_rerank_label == old:
+            self._pending_rerank_label = new
         for utility, label in list(self._utility_profiles.items()):
             if label == old:
                 self._utility_profiles[utility] = new
@@ -673,6 +681,8 @@ class ProviderSection(QWidget):
         # decides at save time whether the reranker is still untouched.
         # Every user switch overwrites it, so the last switch wins.
         self._pending_rerank = dict(preset.get("default_rerank") or {}) or None
+        # Kept with it, so deleting that profile before OK drops the record.
+        self._pending_rerank_label = self._current_profile_label
         # Only overwrite when the preset has a concrete value. The
         # "custom" preset ships empty strings — wiping the user's
         # gateway/model on every switch-to-custom is the second half

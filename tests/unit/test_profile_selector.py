@@ -55,6 +55,7 @@ class _FakeSelf:
         self._profiles = cfg.profiles
         self._active_profile = cfg.active_profile
         self._utility_profiles = cfg.utility_profiles
+        self._pending_rerank_label = None   # no #10 switch recorded
 
 
 def _cfg():
@@ -695,6 +696,7 @@ def _selector_fake(cfg, label="cloud"):
         _active_profile=cfg.active_profile,
         _utility_profiles=cfg.utility_profiles,
         _current_profile_label=label,
+        _pending_rerank_label=None,
         profile_combo=_ProfileCombo(),
         profile_active_check=_Check(),
         api_key_edit=_Edit(),

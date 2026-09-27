@@ -400,6 +400,35 @@ class TestRerankDefaults:
         section.apply_to(out)
         assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
 
+    def _switch_local_to_github(self, section):
+        section.load(_cfg(), label="local")        # a non-active profile
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("github"))
+        assert section._pending_rerank == self.GH
+
+    def test_deleting_the_switched_profile_drops_the_record(
+            self, section, monkeypatch):
+        self._switch_local_to_github(section)
+        monkeypatch.setattr(ps_mod.QMessageBox, "question",
+                            lambda *a, **k: ps_mod.QMessageBox.Yes)
+        section._on_profile_delete()
+        assert "local" not in section.profiles()
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_renaming_the_switched_profile_keeps_the_record(
+            self, section, monkeypatch):
+        self._switch_local_to_github(section)
+        monkeypatch.setattr(ps_mod.QInputDialog, "getText",
+                            lambda *a, **k: ("gh", True))
+        section._on_profile_rename()
+        assert "gh" in section.profiles()
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == (
+            self.GH["method"], self.GH["top_n"])
+
     def test_apply_consumes_the_record(self, section):
         """A second Apply after the user set 'off' again must not re-apply."""
         self._switch_to_github(section)

@@ -63,6 +63,7 @@ def _make_fake_section(base_url="http://gateway.example/v1", model="my-model"):
         aboutToCommit=_Sig(),
         presetApplied=_Sig(),
         _commit_profile_fields=MagicMock(),
+        _current_profile_label="p",
     )
     fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
     fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
