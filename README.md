@@ -75,7 +75,7 @@ Restart FreeCAD. The **FreeCAD AI** workbench will appear in the workbench selec
 There are two ways to configure FreeCAD AI:
 
 - **Edit → Preferences → FreeCAD AI** has four pages (Provider, Behavior, Tools, MCP) showing the same settings as the workbench's Settings dialog (gear icon); both write `config.json` directly.
-- **Workbench Settings dialog** (gear icon in the chat panel) — the same four pages in one window, with Test Connection and Test Reranker.
+- **Workbench Settings dialog** (gear icon in the chat panel) — the same four pages in one window.
 
 Both UIs edit the same file, `<FreeCADAI dir>/config.json`; FreeCAD's own parameter store (`user.cfg`) holds no FreeCAD AI settings.
 

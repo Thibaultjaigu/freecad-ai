@@ -28,8 +28,6 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(translate("SettingsDialog", "FreeCAD AI Settings"))
         self.setMinimumHeight(400)
-        self._test_thread = None
-        self._cfg = get_config()
         self._build_ui()
         # Width comes from the built layout, never a constant. The profile
         # row (combo + New/Rename/Delete) is the widest thing on the form

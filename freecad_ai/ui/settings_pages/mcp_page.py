@@ -23,7 +23,6 @@ QTableWidget = QtWidgets.QTableWidget
 QTableWidgetItem = QtWidgets.QTableWidgetItem
 
 QListWidget = QtWidgets.QListWidget
-QListWidgetItem = QtWidgets.QListWidgetItem
 
 
 class McpPage(SettingsPage):
