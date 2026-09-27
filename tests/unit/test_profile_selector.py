@@ -308,16 +308,8 @@ class TestProfileFieldRoundTrip:
             presetApplied=_Sig(),
         )
         fake._update_vision_ui = lambda profile: None
-        fake._unknown_item_index = lambda: (
-            len(get_provider_names())
-            if fake.provider_combo.count() > len(get_provider_names())
-            else None
-        )
-        fake._drop_unknown_item = lambda: (
-            fake.provider_combo.removeItem(fake._unknown_item_index())
-            if fake._unknown_item_index() is not None
-            else None
-        )
+        fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
+        fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
         return fake
 
     def test_edited_base_url_survives_switching_away_and_back(self):
@@ -727,16 +719,8 @@ def _selector_fake(cfg, label="cloud"):
     fake._rename_profile = (
         lambda old, new: ProviderSection._rename_profile(fake, old, new))
     fake._update_vision_ui = lambda profile: None
-    fake._unknown_item_index = lambda: (
-        len(get_provider_names())
-        if fake.provider_combo.count() > len(get_provider_names())
-        else None
-    )
-    fake._drop_unknown_item = lambda: (
-        fake.provider_combo.removeItem(fake._unknown_item_index())
-        if fake._unknown_item_index() is not None
-        else None
-    )
+    fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
+    fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
     return fake
 
 

@@ -64,16 +64,8 @@ def _make_fake_section(base_url="http://gateway.example/v1", model="my-model"):
         presetApplied=_Sig(),
         _commit_profile_fields=MagicMock(),
     )
-    fake._unknown_item_index = lambda: (
-        len(get_provider_names())
-        if fake.provider_combo.count() > len(get_provider_names())
-        else None
-    )
-    fake._drop_unknown_item = lambda: (
-        fake.provider_combo.removeItem(fake._unknown_item_index())
-        if fake._unknown_item_index() is not None
-        else None
-    )
+    fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
+    fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
     return fake
 
 
