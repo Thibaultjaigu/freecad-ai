@@ -85,7 +85,10 @@ RECORDED = {
         ),
         "combos": 3, "spins": 0, "fields": 0, "buttons": 0},
     "Tool Reranking": {
-        "checkboxes": (), "combos": 1, "spins": 1, "fields": 1, "buttons": 1},
+        # buttons: 0, not 1 -- Test Reranker moved outside the group box
+        # in #101's Task 5 (ToolsPage), directly under the page instead of
+        # inside this group's own layout. Retake settings-dialog-2.png.
+        "checkboxes": (), "combos": 1, "spins": 1, "fields": 1, "buttons": 0},
     "MCP Servers": {
         "checkboxes": (), "combos": 0, "spins": 0, "fields": 0, "buttons": 3},
     "Built-in MCP Server": {
