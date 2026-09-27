@@ -48,6 +48,7 @@ WIKI_IMAGE = {
     "LLM Provider": ("settings-dialog.png",),
     "Utility models": ("settings-dialog.png",),
     "Model Parameters": ("settings-dialog.png",),
+    "Limits": ("settings-dialog.png",),
     "System Prompt": ("settings-dialog.png",),
     "Behavior": ("settings-dialog-2.png",),
     "Tool Reranking": ("settings-dialog-2.png",),
@@ -69,12 +70,19 @@ RECORDED = {
     "Utility models": {
         "checkboxes": (), "combos": 4, "spins": 0, "fields": 0, "buttons": 0},
     "Model Parameters": {
-        "checkboxes": (), "combos": 0, "spins": 4, "fields": 0, "buttons": 3},
+        # spins: 0, not 4 -- the four spin boxes moved into BehaviorPage's
+        # own Limits group in #101's Task 6. Retake settings-dialog.png.
+        "checkboxes": (), "combos": 0, "spins": 0, "fields": 0, "buttons": 3},
+    "Limits": {
+        "checkboxes": (), "combos": 0, "spins": 4, "fields": 0, "buttons": 0},
     "System Prompt": {
         "checkboxes": (), "combos": 0, "spins": 0, "fields": 0, "buttons": 1},
     "Behavior": {
+        # "Model supports tool calling" -> "Use tool calling" -- relabelled
+        # in #101's Task 6 (BehaviorPage) since the checkbox now also
+        # covers providers that never claimed to support it.
         "checkboxes": (
-            "Model supports tool calling (uncheck to fall back to code "
+            "Use tool calling (uncheck to fall back to code "
             "generation)",
             "Auto-execute code in Act mode (skip confirmation dialog)",
             "Keep chat panel open when switching workbenches",

@@ -34,16 +34,6 @@ from freecad_ai.config import AppConfig, ProviderConfig  # noqa: E402
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
 
 
-# Every widget value below deliberately differs from the AppConfig default it
-# would overwrite. If they matched, a leak would write the value already there
-# and every assertion in TestTheLiveConfigIsLeftAlone would pass vacuously.
-EDITED_MAX_TOKENS = 1234
-EDITED_CONTEXT_WINDOW = 55000
-EDITED_MAX_TOOL_TURNS = 7
-EDITED_THINKING_INDEX = 2          # "extended"; the default is "off"
-EDITED_SYSTEM_PROMPT = "you are a lathe"
-
-
 def _cfg():
     cfg = AppConfig()
     cfg.profiles = {
@@ -63,12 +53,6 @@ def _fake(cfg):
     fake.provider_section.current_profile.return_value = ProviderConfig(
         name="anthropic", base_url="https://api.anthropic.com",
         api_key="typed-key", model="claude-sonnet-4-6")
-    fake.max_tokens_spin.value.return_value = EDITED_MAX_TOKENS
-    fake.context_window_spin.value.return_value = EDITED_CONTEXT_WINDOW
-    fake.max_tool_turns_spin.value.return_value = EDITED_MAX_TOOL_TURNS
-    fake.thinking_combo.currentIndex.return_value = EDITED_THINKING_INDEX
-    fake.system_prompt_edit.toPlainText.return_value = EDITED_SYSTEM_PROMPT
-    fake._get_default_prompt_text.return_value = "the stock prompt"
 
     # A MagicMock self no-ops every collaborator method, so `self._save_temp()`
     # inside _test_connection would do nothing and every leak assertion below
@@ -142,16 +126,20 @@ class TestTheLiveConfigIsLeftAlone:
 
 
 class TestTheProbeStillUsesTheEditedValues:
-    """Removing the staging write must not silently demote the probe to the
-    saved values — the point of testing before saving is that it runs with
-    what is on screen."""
+    """max_tokens and thinking now read straight off ``self._cfg`` (#101's
+    Task 6), the same way temperature always has below — there is no
+    Behavior-tab widget left to read instead."""
 
-    def test_max_tokens_comes_from_the_spinbox(self, monkeypatch):
-        captured = _run(monkeypatch, _cfg())
-        assert captured["max_tokens"] == EDITED_MAX_TOKENS
+    def test_max_tokens_comes_from_the_saved_config(self, monkeypatch):
+        cfg = _cfg()
+        cfg.max_tokens = 1234
+        captured = _run(monkeypatch, cfg)
+        assert captured["max_tokens"] == 1234
 
-    def test_thinking_comes_from_the_combo(self, monkeypatch):
-        captured = _run(monkeypatch, _cfg())
+    def test_thinking_comes_from_the_saved_config(self, monkeypatch):
+        cfg = _cfg()
+        cfg.thinking = "extended"
+        captured = _run(monkeypatch, cfg)
         assert captured["thinking"] == "extended"
 
     def test_temperature_comes_from_the_config(self, monkeypatch):

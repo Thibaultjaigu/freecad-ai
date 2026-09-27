@@ -18,11 +18,7 @@ QDialog = QtWidgets.QDialog
 QWidget = QtWidgets.QWidget
 QVBoxLayout = QtWidgets.QVBoxLayout
 QHBoxLayout = QtWidgets.QHBoxLayout
-QFormLayout = QtWidgets.QFormLayout
 QGroupBox = QtWidgets.QGroupBox
-QComboBox = QtWidgets.QComboBox
-QSpinBox = QtWidgets.QSpinBox
-QCheckBox = QtWidgets.QCheckBox
 QPushButton = QtWidgets.QPushButton
 QLabel = QtWidgets.QLabel
 Signal = QtCore.Signal
@@ -37,11 +33,9 @@ QMessageBox = QtWidgets.QMessageBox
 from ..config import (get_config, notify_config_changed, save_current_config,
                       PROVIDER_PRESETS)
 from .provider_section import ProviderSection
+from .settings_pages.behavior_page import BehaviorPage
 from .settings_pages.mcp_page import McpPage
 from .settings_pages.tools_page import ToolsPage
-
-# Thinking combo index -> config value. Shared by _save and _test_connection.
-_THINKING_VALUES = ["off", "on", "extended"]
 
 
 class _TestConnectionThread(QThread):
@@ -209,7 +203,6 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(translate("SettingsDialog", "FreeCAD AI Settings"))
         self.setMinimumHeight(400)
         self._test_thread = None
-        self._last_default_prompt = ""
         self._cfg = get_config()
         self._build_ui()
         # Width comes from the built layout, never a constant. The profile
@@ -252,69 +245,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.provider_section)
         self._last_model_name = ""  # track model name for param save/load
 
-        # Model Parameters group — fixed fields + freeform key-value table
+        # Model Parameters group — freeform key-value table
         model_params_group = QGroupBox(translate("SettingsDialog", "Model Parameters"))
         model_params_layout = QVBoxLayout()
-
-        # Fixed fields (max tokens, context window)
-        fixed_layout = QFormLayout()
-
-        self.max_tokens_spin = QSpinBox()
-        self.max_tokens_spin.setRange(256, 262144)
-        self.max_tokens_spin.setSingleStep(1024)
-        self.max_tokens_spin.setValue(4096)
-        self.max_tokens_spin.setToolTip(
-            translate("SettingsDialog",
-                      "Maximum output tokens per response.\n"
-                      "Context window is determined by the model/provider.")
-        )
-        fixed_layout.addRow(translate("SettingsDialog", "Max Output Tokens:"), self.max_tokens_spin)
-
-        self.context_window_spin = QSpinBox()
-        self.context_window_spin.setRange(4000, 1000000)
-        self.context_window_spin.setSingleStep(10000)
-        self.context_window_spin.setValue(20000)
-        self.context_window_spin.setToolTip(
-            translate("SettingsDialog",
-                      "Context window size in tokens.\n"
-                      "Older messages are automatically compacted\n"
-                      "when the conversation exceeds this limit.\n"
-                      "Set to your model's context limit or lower\n"
-                      "to control API costs.")
-        )
-        fixed_layout.addRow(translate("SettingsDialog", "Context Window:"), self.context_window_spin)
-
-        self.max_tool_turns_spin = QSpinBox()
-        self.max_tool_turns_spin.setRange(0, 999)
-        self.max_tool_turns_spin.setSpecialValueText(
-            translate("SettingsDialog", "endless"))
-        self.max_tool_turns_spin.setValue(30)
-        self.max_tool_turns_spin.setToolTip(
-            translate("SettingsDialog",
-                      "Maximum number of tool-call iterations per response.\n"
-                      "0 means no limit (endless). Default: 30.")
-        )
-        fixed_layout.addRow(
-            translate("SettingsDialog", "Max tool-loop turns (0 = endless):"),
-            self.max_tool_turns_spin)
-
-        self.execution_timeout_spin = QSpinBox()
-        self.execution_timeout_spin.setRange(5, 600)
-        self.execution_timeout_spin.setSingleStep(5)
-        self.execution_timeout_spin.setValue(30)
-        self.execution_timeout_spin.setSuffix(translate("SettingsDialog", " s"))
-        self.execution_timeout_spin.setToolTip(
-            translate("SettingsDialog",
-                      "Time budget for executing one generated code block "
-                      "(sandbox dry-run and live run).\n"
-                      "Raise it for heavy operations on large/detailed models "
-                      "(e.g. scaling). Default: 30.")
-        )
-        fixed_layout.addRow(
-            translate("SettingsDialog", "Code execution timeout:"),
-            self.execution_timeout_spin)
-
-        model_params_layout.addLayout(fixed_layout)
 
         # Freeform sampling parameters table (saved per model name)
         model_params_layout.addWidget(QLabel(
@@ -363,183 +296,8 @@ class SettingsDialog(QDialog):
         model_params_group.setLayout(model_params_layout)
         layout.addWidget(model_params_group)
 
-        # Behavior group
-        behavior_group = QGroupBox(translate("SettingsDialog", "Behavior"))
-        behavior_layout = QVBoxLayout()
-
-        self.enable_tools_check = QCheckBox(
-            translate("SettingsDialog", "Model supports tool calling (uncheck to fall back to code generation)")
-        )
-        behavior_layout.addWidget(self.enable_tools_check)
-
-        self.auto_execute_check = QCheckBox(
-            translate("SettingsDialog", "Auto-execute code in Act mode (skip confirmation dialog)")
-        )
-        behavior_layout.addWidget(self.auto_execute_check)
-
-        self.keep_dock_check = QCheckBox(
-            translate("SettingsDialog", "Keep chat panel open when switching workbenches")
-        )
-        self.keep_dock_check.setToolTip(translate(
-            "SettingsDialog",
-            "When enabled, the FreeCAD AI chat panel stays docked and usable "
-            "in other workbenches instead of hiding when you leave the "
-            "FreeCAD AI workbench."))
-        behavior_layout.addWidget(self.keep_dock_check)
-
-        # Thinking mode
-        thinking_layout = QHBoxLayout()
-        thinking_layout.addWidget(QLabel(translate("SettingsDialog", "Thinking:")))
-        self.thinking_combo = QComboBox()
-        self.thinking_combo.addItems([
-            translate("SettingsDialog", "Off"),
-            translate("SettingsDialog", "On"),
-            translate("SettingsDialog", "Extended"),
-        ])
-        self.thinking_combo.setToolTip(
-            translate("SettingsDialog",
-                      "Off: No reasoning (fastest)\n"
-                      "On: Standard thinking/reasoning\n"
-                      "Extended: Extended thinking with higher budget")
-        )
-        thinking_layout.addWidget(self.thinking_combo)
-        thinking_layout.addStretch()
-        behavior_layout.addLayout(thinking_layout)
-
-        # Strip thinking history
-        self.strip_thinking_check = QCheckBox(
-            translate("SettingsDialog",
-                      "Strip thinking from conversation history")
-        )
-        self.strip_thinking_check.setToolTip(
-            translate("SettingsDialog",
-                      "Remove thinking/reasoning content from previous turns\n"
-                      "before sending to the API. Required by some models\n"
-                      "(e.g. Gemma) that reject thinking content in history.\n\n"
-                      "Auto-detected by model name. Check/uncheck to override.")
-        )
-        self.strip_thinking_check.setTristate(True)
-        self.strip_thinking_check.stateChanged.connect(
-            self._on_strip_thinking_changed)
-        behavior_layout.addWidget(self.strip_thinking_check)
-
-        # Keeping reasoning in history is a reply-quality setting, not a
-        # caching one, which is why it sits here and ships ticked.
-        self.preserve_reasoning_check = QCheckBox(
-            translate("SettingsDialog",
-                      "Keep model reasoning in conversation history")
-        )
-        self.preserve_reasoning_check.setToolTip(
-            translate("SettingsDialog",
-                      "Store the thinking a model produced for a turn and send\n"
-                      "it back with that turn on later requests, which is what\n"
-                      "the provider already saw.\n\n"
-                      "Moonshot report a measurable drop in reply quality on\n"
-                      "turns whose reasoning is missing, so this is on by\n"
-                      "default. Untick it to keep the history as it was before\n"
-                      "v0.27.0-alpha.\n\n"
-                      "Models that reject reasoning in history (e.g. Gemma) are\n"
-                      "unaffected -- \"Strip thinking from conversation\n"
-                      "history\" above still applies.")
-        )
-        behavior_layout.addWidget(self.preserve_reasoning_check)
-
-        # Prompt caching (#47). Both default off, so an existing install
-        # behaves exactly as it did before the upgrade.
-        self.prompt_cache_check = QCheckBox(
-            translate("SettingsDialog",
-                      "Optimize prompt for caching (may change replies)")
-        )
-        self.prompt_cache_check.setToolTip(
-            translate("SettingsDialog",
-                      "Providers discount a prompt they have seen before, but\n"
-                      "only while its opening stays byte-identical. The live\n"
-                      "document state sits at the top of the prompt, so it\n"
-                      "changes every time you add a feature and the discount\n"
-                      "is lost -- including on the much larger tool list\n"
-                      "behind it.\n\n"
-                      "This moves the document state to the end of your last\n"
-                      "message instead, and marks a cache point on Anthropic.\n\n"
-                      "The model still sees the same information, but in a\n"
-                      "different place, so its replies may differ. That is why\n"
-                      "this is off by default.")
-        )
-        behavior_layout.addWidget(self.prompt_cache_check)
-
-        self.log_usage_check = QCheckBox(
-            translate("SettingsDialog", "Log token usage to the Report view")
-        )
-        self.log_usage_check.setToolTip(
-            translate("SettingsDialog",
-                      "Print one line per reply with the prompt and completion\n"
-                      "token counts, and how much of the prompt was served\n"
-                      "from cache.\n\n"
-                      "Turn this on first to see what your requests cost now,\n"
-                      "then turn on the caching option above and compare.\n\n"
-                      "On OpenAI-style providers this adds a field to the\n"
-                      "request asking for the counts, which a few unusual\n"
-                      "endpoints may reject.")
-        )
-        behavior_layout.addWidget(self.log_usage_check)
-
-        # System prompt
-        prompt_group = QGroupBox(translate("SettingsDialog", "System Prompt"))
-        prompt_layout = QVBoxLayout()
-
-        prompt_btn_layout = QHBoxLayout()
-        self.prompt_reset_btn = QPushButton(translate("SettingsDialog", "Reset to Default"))
-        self.prompt_reset_btn.clicked.connect(self._reset_system_prompt)
-        prompt_btn_layout.addWidget(self.prompt_reset_btn)
-        prompt_btn_layout.addStretch()
-        prompt_layout.addLayout(prompt_btn_layout)
-
-        QPlainTextEdit = QtWidgets.QPlainTextEdit
-        self.system_prompt_edit = QPlainTextEdit()
-        self.system_prompt_edit.setMinimumHeight(120)
-        self.system_prompt_edit.setMaximumHeight(200)
-        self.system_prompt_edit.setPlaceholderText(
-            translate("SettingsDialog",
-                      "Custom system prompt instructions. "
-                      "Dynamic sections (document state, skills, AGENTS.md) "
-                      "are always appended automatically."))
-        prompt_layout.addWidget(self.system_prompt_edit)
-
-        prompt_group.setLayout(prompt_layout)
-        layout.addWidget(prompt_group)
-
-        # Viewport capture settings
-        viewport_layout = QHBoxLayout()
-        viewport_layout.addWidget(QLabel(translate("SettingsDialog", "Viewport capture:")))
-        self.viewport_capture_combo = QComboBox()
-        self.viewport_capture_combo.addItems([
-            translate("SettingsDialog", "Off"),
-            translate("SettingsDialog", "Every Message"),
-            translate("SettingsDialog", "After Changes"),
-        ])
-        self.viewport_capture_combo.setToolTip(
-            translate("SettingsDialog",
-                      "Off: No auto-capture\n"
-                      "Every Message: Capture screenshot with each message\n"
-                      "After Changes: Capture after tool calls modify the document")
-        )
-        viewport_layout.addWidget(self.viewport_capture_combo)
-        viewport_layout.addStretch()
-        behavior_layout.addLayout(viewport_layout)
-
-        resolution_layout = QHBoxLayout()
-        resolution_layout.addWidget(QLabel(translate("SettingsDialog", "Capture resolution:")))
-        self.viewport_resolution_combo = QComboBox()
-        self.viewport_resolution_combo.addItems([
-            translate("SettingsDialog", "Low (400x300)"),
-            translate("SettingsDialog", "Medium (800x600)"),
-            translate("SettingsDialog", "High (1280x960)"),
-        ])
-        resolution_layout.addWidget(self.viewport_resolution_combo)
-        resolution_layout.addStretch()
-        behavior_layout.addLayout(resolution_layout)
-
-        behavior_group.setLayout(behavior_layout)
-        layout.addWidget(behavior_group)
+        self.behavior_page = BehaviorPage()
+        layout.addWidget(self.behavior_page)
 
         self.tools_page = ToolsPage()
         layout.addWidget(self.tools_page)
@@ -609,39 +367,7 @@ class SettingsDialog(QDialog):
         # ProviderSection.load for why the live singleton must not see them).
         self.provider_section.load(cfg)
 
-        self.max_tokens_spin.setValue(cfg.max_tokens)
-        self.context_window_spin.setValue(cfg.context_window)
-        self.max_tool_turns_spin.setValue(cfg.max_tool_turns)
-        self.execution_timeout_spin.setValue(cfg.execution_timeout)
-
-        self.enable_tools_check.setChecked(cfg.enable_tools)
-        self.auto_execute_check.setChecked(cfg.auto_execute)
-        self.keep_dock_check.setChecked(cfg.keep_dock_on_workbench_switch)
-
-        thinking_map = {"off": 0, "on": 1, "extended": 2}
-        self.thinking_combo.setCurrentIndex(thinking_map.get(cfg.thinking, 0))
-
-        # Strip thinking history — tristate: PartiallyChecked=auto, Checked=on, Unchecked=off
-        self._update_strip_thinking_ui(cfg.strip_thinking_history)
-
-        # Prompt caching (#47)
-        self.preserve_reasoning_check.setChecked(cfg.preserve_reasoning_history)
-        self.prompt_cache_check.setChecked(cfg.optimize_prompt_caching)
-        self.log_usage_check.setChecked(cfg.log_token_usage)
-
-        # System prompt text: show override if set, otherwise generate default
-        default_prompt = self._get_default_prompt_text()
-        self._last_default_prompt = default_prompt
-        if cfg.system_prompt_override:
-            self.system_prompt_edit.setPlainText(cfg.system_prompt_override)
-        else:
-            self.system_prompt_edit.setPlainText(default_prompt)
-
-        capture_map = {"off": 0, "every_message": 1, "after_changes": 2}
-        self.viewport_capture_combo.setCurrentIndex(capture_map.get(cfg.viewport_capture, 0))
-
-        resolution_map = {"low": 0, "medium": 1, "high": 2}
-        self.viewport_resolution_combo.setCurrentIndex(resolution_map.get(cfg.viewport_resolution, 1))
+        self.behavior_page.load(cfg)
 
         self.mcp_page.load(cfg)
         self.tools_page.load(cfg)
@@ -674,36 +400,6 @@ class SettingsDialog(QDialog):
             section.model_edit.text(), self._cfg, section.current_profile())
 
     # ── Model Parameters table helpers ─────────────────────────
-
-    # ── Strip Thinking History helpers ─────────────────────────
-
-    def _update_strip_thinking_ui(self, value: bool | None):
-        """Set the tristate checkbox from config value.
-
-        None=auto (PartiallyChecked), True=on (Checked), False=off (Unchecked).
-        """
-        self.strip_thinking_check.stateChanged.disconnect(
-            self._on_strip_thinking_changed)
-        if value is None:
-            self.strip_thinking_check.setCheckState(QtCore.Qt.PartiallyChecked)
-        elif value:
-            self.strip_thinking_check.setCheckState(QtCore.Qt.Checked)
-        else:
-            self.strip_thinking_check.setCheckState(QtCore.Qt.Unchecked)
-        self.strip_thinking_check.stateChanged.connect(
-            self._on_strip_thinking_changed)
-
-    def _on_strip_thinking_changed(self, state):
-        """User toggled the checkbox — disable tristate once manually set."""
-        # Once the user clicks, it cycles Unchecked↔Checked (no more partial)
-        pass
-
-    def _read_strip_thinking_state(self) -> bool | None:
-        """Read the tristate checkbox as None/True/False."""
-        state = self.strip_thinking_check.checkState()
-        if state == QtCore.Qt.PartiallyChecked:
-            return None
-        return state == QtCore.Qt.Checked
 
     def _on_model_changed(self, new_model: str):
         """Stash the edited table on the working-copy profile, load the new model's."""
@@ -805,17 +501,6 @@ class SettingsDialog(QDialog):
             params = {"temperature": 0.3}
         self._populate_model_params_table(params)
 
-    def _get_default_prompt_text(self) -> str:
-        """Generate the default system prompt for the current settings."""
-        from ..core.system_prompt import get_default_system_prompt
-        return get_default_system_prompt(mode="act", tools_enabled=True)
-
-    def _reset_system_prompt(self):
-        """Reset the system prompt text to the default for current settings."""
-        default = self._get_default_prompt_text()
-        self.system_prompt_edit.setPlainText(default)
-        self._last_default_prompt = default
-
     @staticmethod
     def _profiles_missing_base_url(profiles) -> list:
         """Sorted labels of profiles with no Base URL, which cannot work.
@@ -889,11 +574,6 @@ class SettingsDialog(QDialog):
         if not self._confirm_incomplete_profiles(section.profiles()):
             return
 
-        cfg.max_tokens = self.max_tokens_spin.value()
-        cfg.context_window = self.context_window_spin.value()
-        cfg.max_tool_turns = self.max_tool_turns_spin.value()
-        cfg.execution_timeout = self.execution_timeout_spin.value()
-
         # Model params reach the profile via section.commit() above (its
         # aboutToCommit slot sets prof.params = the table, in full) —
         # cfg.model_params is legacy and is neither read nor written here.
@@ -905,35 +585,7 @@ class SettingsDialog(QDialog):
             # passes when a profile states no temperature.
             cfg.temperature = params.get("temperature", cfg.temperature)
 
-        cfg.enable_tools = self.enable_tools_check.isChecked()
-        cfg.auto_execute = self.auto_execute_check.isChecked()
-        cfg.keep_dock_on_workbench_switch = self.keep_dock_check.isChecked()
-
-        cfg.thinking = _THINKING_VALUES[self.thinking_combo.currentIndex()]
-
-        # Strip thinking history — tristate checkbox
-        cfg.strip_thinking_history = self._read_strip_thinking_state()
-
-        # Prompt caching (#47)
-        cfg.preserve_reasoning_history = \
-            self.preserve_reasoning_check.isChecked()
-        cfg.optimize_prompt_caching = self.prompt_cache_check.isChecked()
-        cfg.log_token_usage = self.log_usage_check.isChecked()
-
-        # Save system prompt override (empty if user hasn't changed from default)
-        custom_text = self.system_prompt_edit.toPlainText().strip()
-        default_text = self._get_default_prompt_text().strip()
-        if custom_text == default_text:
-            cfg.system_prompt_override = ""
-        else:
-            cfg.system_prompt_override = custom_text
-
-        capture_values = ["off", "every_message", "after_changes"]
-        cfg.viewport_capture = capture_values[self.viewport_capture_combo.currentIndex()]
-
-        resolution_values = ["low", "medium", "high"]
-        cfg.viewport_resolution = resolution_values[self.viewport_resolution_combo.currentIndex()]
-
+        self.behavior_page.apply_to(cfg)
         self.mcp_page.apply_to(cfg)
         self.tools_page.apply_to(cfg)
 
@@ -947,12 +599,7 @@ class SettingsDialog(QDialog):
         # refreshes from this, whichever window saved (#99).
         notify_config_changed()
 
-        # The menu's "Keep Chat Panel Open" tick mirrors this flag, and
-        # FreeCAD never re-asks the command for its state, so changing it here
-        # would otherwise leave the checkmark stale until FreeCAD restarts.
-        from .command_state import set_command_checked
-        set_command_checked("FreeCADAI_ToggleKeepDock",
-                            cfg.keep_dock_on_workbench_switch)
+        self.behavior_page.after_save(cfg)
 
         self.accept()
 
@@ -1075,11 +722,11 @@ class SettingsDialog(QDialog):
 
         self._test_thread = _TestConnectionThread(
             provider_name, base_url, api_key, model, model_params,
-            max_tokens=self.max_tokens_spin.value(),
+            max_tokens=self._cfg.max_tokens,
             # The params table supplies the dialog's own temperature and
             # outranks this inside LLMClient; cfg is only the fallback.
             temperature=self._cfg.temperature,
-            thinking=_THINKING_VALUES[self.thinking_combo.currentIndex()],
+            thinking=self._cfg.thinking,
             parent=self,
         )
         self._test_thread.finished.connect(self._on_test_finished)

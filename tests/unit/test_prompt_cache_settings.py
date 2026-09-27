@@ -11,20 +11,30 @@ the caching one in particular changes what the model is shown, which is
 not a thing to switch on for someone without asking.
 """
 
-from unittest import mock
+import os
 
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest  # noqa: E402
 
 try:
-    import PySide6  # noqa: F401
+    from PySide6 import QtWidgets
 except ImportError:
     try:
-        import PySide2  # noqa: F401
+        from PySide2 import QtWidgets
     except ImportError:
         pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
 
 from freecad_ai.config import AppConfig  # noqa: E402
-from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.behavior_page import BehaviorPage  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    return app
 
 
 @pytest.fixture
@@ -37,22 +47,11 @@ def cfg(monkeypatch):
     return c
 
 
-def _fake_save_dialog(prompt_cache, log_usage):
-    """A fake self carrying what _save indexes or reads for real.
-
-    Every combo below is used as a list index, so a MagicMock would raise
-    TypeError rather than reach the lines under test.
-    """
-    fake = mock.MagicMock()
-    for combo in ("thinking_combo", "viewport_capture_combo",
-                  "viewport_resolution_combo", "rerank_method_combo"):
-        getattr(fake, combo).currentIndex.return_value = 0
-    fake.rerank_pinned_edit.text.return_value = ""
-    # Unpacked into two names, so a bare MagicMock is a ValueError.
-    fake._parse_server_address.return_value = ("127.0.0.1", 8765)
-    fake.prompt_cache_check.isChecked.return_value = prompt_cache
-    fake.log_usage_check.isChecked.return_value = log_usage
-    return fake
+@pytest.fixture
+def page(qapp, tmp_config_dir):
+    p = BehaviorPage()
+    yield p
+    p.deleteLater()
 
 
 class TestTheDefaults:
@@ -73,54 +72,66 @@ class TestTheDefaults:
 
 class TestOKWritesThemToTheConfig:
 
-    def test_caching_on(self, cfg):
-        SettingsDialog._save(_fake_save_dialog(True, False))
+    def test_caching_on(self, page):
+        page.load(AppConfig())
+        page.prompt_cache_check.setChecked(True)
+        target = AppConfig()
 
-        assert cfg.optimize_prompt_caching is True
+        page.apply_to(target)
 
-    def test_usage_logging_on(self, cfg):
-        SettingsDialog._save(_fake_save_dialog(False, True))
+        assert target.optimize_prompt_caching is True
 
-        assert cfg.log_token_usage is True
+    def test_usage_logging_on(self, page):
+        page.load(AppConfig())
+        page.log_usage_check.setChecked(True)
+        target = AppConfig()
 
-    def test_unchecked_writes_false_not_merely_leaves_the_default(self, cfg):
+        page.apply_to(target)
+
+        assert target.log_token_usage is True
+
+    def test_unchecked_writes_false_not_merely_leaves_the_default(self, page):
         """Start from True, so an absent write leaves True and fails."""
+        cfg = AppConfig()
         cfg.optimize_prompt_caching = True
         cfg.log_token_usage = True
+        page.load(cfg)
 
-        SettingsDialog._save(_fake_save_dialog(False, False))
+        page.prompt_cache_check.setChecked(False)
+        page.log_usage_check.setChecked(False)
+        page.apply_to(cfg)
 
         assert cfg.optimize_prompt_caching is False
         assert cfg.log_token_usage is False
 
-    def test_the_two_are_independent(self, cfg):
-        SettingsDialog._save(_fake_save_dialog(True, False))
+    def test_the_two_are_independent(self, page):
+        page.load(AppConfig())
+        page.prompt_cache_check.setChecked(True)
+        target = AppConfig()
 
-        assert cfg.optimize_prompt_caching is True
-        assert cfg.log_token_usage is False
+        page.apply_to(target)
+
+        assert target.optimize_prompt_caching is True
+        assert target.log_token_usage is False
 
 
 class TestReopeningTheDialogShowsWhatWasSaved:
 
-    def test_both_checkboxes_are_restored(self, cfg):
+    def test_both_checkboxes_are_restored(self, page):
+        cfg = AppConfig()
         cfg.optimize_prompt_caching = True
         cfg.log_token_usage = True
-        fake = mock.MagicMock()
-        fake._cfg = cfg
 
-        SettingsDialog._load_from_config(fake)
+        page.load(cfg)
 
-        fake.prompt_cache_check.setChecked.assert_called_once_with(True)
-        fake.log_usage_check.setChecked.assert_called_once_with(True)
+        assert page.prompt_cache_check.isChecked() is True
+        assert page.log_usage_check.isChecked() is True
 
-    def test_an_off_config_leaves_them_unticked(self, cfg):
-        fake = mock.MagicMock()
-        fake._cfg = cfg
+    def test_an_off_config_leaves_them_unticked(self, page):
+        page.load(AppConfig())
 
-        SettingsDialog._load_from_config(fake)
-
-        fake.prompt_cache_check.setChecked.assert_called_once_with(False)
-        fake.log_usage_check.setChecked.assert_called_once_with(False)
+        assert page.prompt_cache_check.isChecked() is False
+        assert page.log_usage_check.isChecked() is False
 
 
 class TestTheClientIsBuiltFromThoseFlags:
