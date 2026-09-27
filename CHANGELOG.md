@@ -30,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   file was found in; previously a single base directory was computed for the
   whole load, which in merge mode would hand every file the same neighbour.
 
+- **Per-profile output cap and compaction threshold (#103).** A profile can
+  now carry its own limits, so switching from a cloud model with a 200k window
+  to a local 8k model no longer keeps the cloud model's numbers. Put a
+  `max_tokens` row in a profile's Model Parameters table to set its output
+  cap — it beats Max Output Tokens but never a job's own cap (the reranker
+  keeps its 1024). A row that is not a positive integer is ignored with a
+  warning in the Report view. The new **Compact above** field under Vision
+  sets the profile's compaction threshold; **Use global** takes the Behavior
+  page's value. The threshold always comes from the chat profile, even when
+  compaction runs on another one. Existing configs are unchanged: no profile
+  has either value until you set one.
+
 ### Changed
 
 - **Edit → Preferences → FreeCAD AI now shows profiles and utility models**,
@@ -65,6 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Test Connection uses the saved max output tokens and thinking mode.
 - Test Connection now sits with the provider fields inside the scrolling
   page, no longer beside OK/Cancel.
+
+- **"Context Window" is now labelled "Compact above" (#103).** It always was
+  a compaction threshold, not the model's window; the config key is still
+  `context_window` and existing values keep their meaning.
+- **The truncation warning names the cap that actually applied (#103)** and
+  points at Settings → Behavior or the profile's `max_tokens` row, instead of
+  the Model Parameters group the field left in #101.
 
 ### Fixed
 

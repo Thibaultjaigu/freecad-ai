@@ -172,6 +172,10 @@ def _fake_page(cfg, shown="chat"):
     fake.base_url_edit.text.return_value = prof.base_url
     fake.api_key_edit.text.return_value = prof.api_key
     fake.model_edit.text.return_value = prof.model
+    # Compact above shown and untouched (#103).
+    fake.compact_above_spin.value.return_value = 0
+    fake._compact_shown = 0
+    fake._compact_shown_value = prof.context_window
     return fake
 
 

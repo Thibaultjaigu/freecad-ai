@@ -30,9 +30,14 @@ QPushButton = QtWidgets.QPushButton
 QLabel = QtWidgets.QLabel
 QMessageBox = QtWidgets.QMessageBox
 QInputDialog = QtWidgets.QInputDialog
+QSpinBox = QtWidgets.QSpinBox
 Signal = QtCore.Signal
 
 _URL_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
+
+# The Behavior page's "Compact above" spin starts here too. Applied only to
+# values typed on this page, so a smaller hand edit in config.json survives.
+_COMPACT_ABOVE_FLOOR = 4000
 
 
 class ProviderSection(QWidget):
@@ -192,6 +197,22 @@ class ProviderSection(QWidget):
         vision_layout.addStretch()
         provider_layout.addRow(translate("SettingsDialog", "Vision:"),
                                vision_layout)
+
+        # Compaction threshold for this profile's model (#103). A profile
+        # field, not a params row: it is client-side only and must never
+        # reach a vendor, where a thin proxy may 400 on an unknown key.
+        self.compact_above_spin = QSpinBox()
+        self.compact_above_spin.setRange(0, 1000000)
+        self.compact_above_spin.setSingleStep(10000)
+        self.compact_above_spin.setSpecialValueText(
+            translate("SettingsDialog", "Use global"))
+        self.compact_above_spin.setToolTip(
+            translate("SettingsDialog",
+                      "Compact older messages once the conversation is "
+                      "estimated above this many tokens.\n"
+                      "\"Use global\" takes the value from Behavior → Limits."))
+        provider_layout.addRow(translate("SettingsDialog", "Compact above:"),
+                               self.compact_above_spin)
 
         provider_group.setLayout(provider_layout)
         layout.addWidget(provider_group)
@@ -601,6 +622,15 @@ class ProviderSection(QWidget):
         # section holds its pending value so a tri-state (None) survives.
         if hasattr(self, "_vision_override_value"):
             prof.vision_override = self._vision_override_value
+        if hasattr(self, "_compact_shown"):
+            typed = self.compact_above_spin.value()
+            if typed == self._compact_shown:
+                # Unchanged, or typed back: restore exactly what was loaded.
+                prof.context_window = self._compact_shown_value
+            elif typed == 0:
+                prof.context_window = None
+            else:
+                prof.context_window = max(typed, _COMPACT_ABOVE_FLOOR)
         # The Settings dialog writes its params table into prof.params
         # here; the preferences page has no table and leaves them alone.
         self.aboutToCommit.emit(prof)
@@ -655,6 +685,12 @@ class ProviderSection(QWidget):
         self.base_url_edit.setText(prof.base_url)
         self.model_edit.setText(prof.model)
         self._update_vision_ui(prof)
+        # Remember what was shown: _commit_profile_fields writes the spin
+        # back only when the user changed it, so an untouched hand edit
+        # (3000, below the typed floor) is never re-clamped.
+        self._compact_shown_value = prof.context_window
+        self.compact_above_spin.setValue(prof.context_window or 0)
+        self._compact_shown = self.compact_above_spin.value()
 
         is_active = label == self._active_profile
         # blockSignals, or populating the widgets would itself re-point

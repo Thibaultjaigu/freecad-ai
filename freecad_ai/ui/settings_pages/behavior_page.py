@@ -44,8 +44,9 @@ class BehaviorPage(SettingsPage):
         self.max_tokens_spin.setValue(4096)
         self.max_tokens_spin.setToolTip(
             translate("SettingsDialog",
-                      "Maximum output tokens per response.\n"
-                      "Context window is determined by the model/provider.")
+                      "Default output cap per response.\n"
+                      "A profile can set its own with a max_tokens row\n"
+                      "in its Model Parameters table.")
         )
         fixed_layout.addRow(translate("SettingsDialog", "Max Output Tokens:"), self.max_tokens_spin)
 
@@ -55,13 +56,12 @@ class BehaviorPage(SettingsPage):
         self.context_window_spin.setValue(20000)
         self.context_window_spin.setToolTip(
             translate("SettingsDialog",
-                      "Context window size in tokens.\n"
-                      "Older messages are automatically compacted\n"
-                      "when the conversation exceeds this limit.\n"
-                      "Set to your model's context limit or lower\n"
-                      "to control API costs.")
+                      "Older messages are compacted once the conversation\n"
+                      "is estimated above this many tokens.\n"
+                      "Default for profiles that don't set their own\n"
+                      "on the Provider page.")
         )
-        fixed_layout.addRow(translate("SettingsDialog", "Context Window:"), self.context_window_spin)
+        fixed_layout.addRow(translate("SettingsDialog", "Compact above:"), self.context_window_spin)
 
         self.max_tool_turns_spin = QSpinBox()
         self.max_tool_turns_spin.setRange(0, 999)

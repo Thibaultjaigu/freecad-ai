@@ -4,11 +4,16 @@ Each call site names a utility; an unmapped utility inherits the active
 profile, which is what every call site did before profiles existed.
 """
 
+import logging
+
+import pytest
+
 from freecad_ai.config import AppConfig, ProviderConfig
 from freecad_ai.llm.client import (
     create_client,
     create_client_from_config,
     resolve_profile,
+    take_max_tokens_row,
 )
 
 
@@ -254,3 +259,60 @@ class TestResolveParams:
         cfg = _cfg()
         cfg.model_params = {"qwen3:8b": {"temperature": 0.5}}
         assert resolve_params(cfg, cfg.profiles["local"]) == {"top_k": 40}
+
+
+class TestOutputCapResolution:
+    """#103: call site > profile max_tokens row > cfg.max_tokens."""
+
+    def _cfg(self, row):
+        cfg = _cfg()
+        cfg.max_tokens = 4096
+        cfg.profiles["local"].params = {"top_k": 40, "max_tokens": row}
+        cfg.active_profile = "local"
+        return cfg
+
+    def test_the_row_beats_the_global(self):
+        assert create_client(self._cfg(16000)).max_tokens == 16000
+
+    def test_the_call_site_beats_the_row(self):
+        """The reranker's 1024 must survive a max_tokens: 32000 row."""
+        client = create_client(self._cfg(32000), "rerank", max_tokens=1024)
+        assert client.max_tokens == 1024
+
+    def test_no_row_uses_the_global(self):
+        assert create_client(_cfg()).max_tokens == AppConfig().max_tokens
+
+    def test_the_row_is_not_sent_as_a_param(self):
+        client = create_client(self._cfg(16000))
+        assert client.model_params == {"top_k": 40}
+
+    def test_the_profile_keeps_its_row(self):
+        cfg = self._cfg(16000)
+        create_client(cfg)
+        assert cfg.profiles["local"].params["max_tokens"] == 16000
+
+    def test_an_integral_float_is_accepted(self):
+        client = create_client(self._cfg(8192.0))
+        assert client.max_tokens == 8192
+        assert isinstance(client.max_tokens, int)
+
+    @pytest.mark.parametrize("bad", ["abc", 0, -5, True, 8192.5])
+    def test_bad_rows_fall_back_with_a_warning(self, bad, caplog):
+        caplog.set_level(logging.WARNING)
+        client = create_client(self._cfg(bad))
+        assert client.max_tokens == 4096
+        assert "max_tokens" not in client.model_params
+        assert 'in profile "local" ignored — not a positive integer' in caplog.text
+
+    def test_the_warning_quotes_a_string_value(self, caplog):
+        caplog.set_level(logging.WARNING)
+        take_max_tokens_row({"max_tokens": "abc"}, "local")
+        assert ('max_tokens row "abc" in profile "local" ignored'
+                ' — not a positive integer') in caplog.text
+
+    def test_the_utility_profile_row_applies_to_that_utility(self):
+        cfg = _cfg()
+        cfg.profiles["local"].params = {"max_tokens": 2000}
+        cfg.utility_profiles["compaction"] = "local"
+        assert create_client(cfg, "compaction").max_tokens == 2000
+        assert create_client(cfg).max_tokens == cfg.max_tokens

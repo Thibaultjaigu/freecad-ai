@@ -102,6 +102,25 @@ def test_a_failed_load_writes_nothing(page, monkeypatch):
     assert target.to_dict() == _cfg().to_dict()
 
 
+def test_the_params_label_says_per_profile(page):
+    texts = [w.text() for w in page.findChildren(QtWidgets.QLabel)]
+    assert "Parameters sent with each request (saved per profile):" in texts
+
+
+def test_the_params_tooltip_mentions_max_tokens(page):
+    assert "max_tokens" in page.model_params_table.toolTip()
+
+
+def test_a_max_tokens_row_never_writes_the_global(page):
+    page.load(_cfg())
+    page._populate_model_params_table(
+        {"temperature": 0.2, "max_tokens": 16000})
+    target = _cfg()
+    page.apply_to(target)
+    assert target.max_tokens == AppConfig().max_tokens
+    assert target.profiles["cloud"].params["max_tokens"] == 16000
+
+
 class TestConnectionProbe:
     def _capture(self, monkeypatch):
         made = {}
@@ -137,6 +156,27 @@ class TestConnectionProbe:
         page._test_connection()
         assert made["kwargs"]["max_tokens"] == 12345
         assert made["kwargs"]["thinking"] == "extended"
+
+    def test_a_max_tokens_row_is_the_probe_cap(
+            self, page, monkeypatch, tmp_config_dir):
+        made = self._capture(monkeypatch)
+        page.load(_cfg())
+        page._populate_model_params_table(
+            {"temperature": 0.2, "max_tokens": 16000})
+        page._test_connection()
+        assert made["kwargs"]["max_tokens"] == 16000
+        assert "max_tokens" not in made["args"][4]     # model_params
+
+    def test_a_bad_row_falls_back_to_the_saved_global(
+            self, page, monkeypatch, tmp_config_dir):
+        import freecad_ai.config as config_mod
+        config_mod.get_config().max_tokens = 12345
+        made = self._capture(monkeypatch)
+        page.load(_cfg())
+        page._populate_model_params_table({"max_tokens": "8k"})
+        page._test_connection()
+        assert made["kwargs"]["max_tokens"] == 12345
+        assert "max_tokens" not in made["args"][4]
 
     def test_the_thread_outlives_the_page(self, page, monkeypatch):
         made = self._capture(monkeypatch)
