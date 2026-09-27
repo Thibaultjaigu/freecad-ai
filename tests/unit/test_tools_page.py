@@ -76,6 +76,26 @@ def test_an_edit_writes_only_that_field(page):
     assert target.use_external_editor is True
 
 
+@pytest.mark.parametrize("edit", ["method", "top_n"])
+def test_a_reranker_edit_writes_method_and_top_n_together(page, edit):
+    """#10: the Provider page may have just set the preset pair; editing
+    either half here must overwrite both, or the preset's other half
+    survives when Provider saves first."""
+    page.load(AppConfig())
+    if edit == "method":
+        page.rerank_method_combo.setCurrentIndex(2)       # llm
+        expected = ("llm", 15)
+    else:
+        page.rerank_top_n_spin.setValue(20)
+        expected = ("off", 20)
+    target = AppConfig()
+    target.rerank_method, target.rerank_top_n = "keyword", 8
+    target.use_external_editor = True                     # not ours
+    page.apply_to(target)
+    assert (target.rerank_method, target.rerank_top_n) == expected
+    assert target.use_external_editor is True
+
+
 class TestEditorPrompt:
     def _answer(self, monkeypatch, button):
         monkeypatch.setattr(tp_mod.QMessageBox, "question",

@@ -226,6 +226,22 @@ class ToolsPage(SettingsPage):
             "scan_freecad_macros": self.scan_macros_cb.isChecked(),
         }
 
+    def apply_to(self, cfg):
+        """Only-changed writes, except the reranker method and top_n,
+        which go as a pair: the Provider page's #10 preset default fills
+        whichever of the two is still at its factory value, so writing
+        just the edited one would let the preset's other half survive
+        when Provider saves first. Written together, the pair on screen
+        wins whichever page saves last."""
+        super().apply_to(cfg)
+        if self._baseline is None:
+            return
+        values = self._values()
+        pair = ("rerank_method", "rerank_top_n")
+        if any(values[k] != self._baseline.get(k) for k in pair):
+            for k in pair:
+                setattr(cfg, k, values[k])
+
     # --- User Tools methods ---
 
     def _load_user_tools_list(self):

@@ -70,6 +70,24 @@ def test_edits_on_two_pages_both_land(dialog):
     assert (cfg.max_tokens, cfg.mcp_server_port) == (8192, 31000)
 
 
+@pytest.mark.parametrize("edit, expected", [
+    ("method", ("llm", 15)), ("top_n", ("off", 20))])
+def test_a_provider_switch_and_a_reranker_edit_keep_the_shown_pair(
+        dialog, edit, expected):
+    """#10 in the dialog: the Tools page's pair wins over the preset's."""
+    from freecad_ai.llm.providers import get_provider_names
+    section = dialog.provider_section
+    section.provider_combo.setCurrentIndex(get_provider_names().index("github"))
+    assert section._pending_rerank == {"method": "keyword", "top_n": 8}
+    if edit == "method":
+        dialog.tools_page.rerank_method_combo.setCurrentIndex(2)
+    else:
+        dialog.tools_page.rerank_top_n_spin.setValue(20)
+    dialog._save()
+    cfg = config_mod.get_config()
+    assert (cfg.rerank_method, cfg.rerank_top_n) == expected
+
+
 def test_a_declined_veto_saves_nothing(dialog, calls, monkeypatch):
     monkeypatch.setattr(dialog, "_confirm_incomplete_profiles",
                         lambda profiles: False)

@@ -243,10 +243,14 @@ class ProviderSection(QWidget):
         cfg.active_profile = self._active_profile
         cfg.utility_profiles = self._collect_utility_profiles(
             self._utility_profiles)
-        # Factory defaults = off + 15. Checked on the *live* config, so an
-        # explicit reranker choice saved by the Tools page (in either order)
-        # is never overwritten; an explicit off/15 is indistinguishable, as
-        # it was when this check read the widgets.
+        # Factory defaults = off + 15. Checked on the *live* config: if the
+        # Tools page saved an explicit reranker choice first, the pair is
+        # no longer off/15 and the preset is skipped. If this runs first,
+        # the preset lands and the Tools page then overwrites it — it
+        # writes method and top_n together whenever either was edited, so
+        # the pair on screen wins in either order. An explicit off/15 is
+        # indistinguishable from untouched, as it was when this check read
+        # the widgets.
         pending, self._pending_rerank = self._pending_rerank, None
         if (pending and cfg.rerank_method == "off"
                 and cfg.rerank_top_n == 15):

@@ -187,22 +187,45 @@ def test_after_save_runs(pages, monkeypatch):
     assert len(calls) == 1
 
 
-def test_provider_page_before_and_after_tools_page_agree(pages):
-    """#10 order independence: an explicit reranker choice wins either way."""
+@pytest.mark.parametrize("order", ["preferences", "reversed"])
+@pytest.mark.parametrize("edit, expected", [
+    ("method", ("llm", 15)),     # method → llm; top_n stays 15 on screen
+    ("top_n", ("off", 20)),      # top_n → 20; method stays off on screen
+])
+def test_provider_page_before_and_after_tools_page_agree(pages, order, edit,
+                                                         expected):
+    """#10 order independence: the reranker pair shown on the Tools page
+    wins whole, whichever page saves first. Fresh config and pages per
+    order (the fixture), so the provider switch really fires each time."""
     import freecad_ai.llm.providers as prov_mod
+    c = config_mod.get_config()
+    assert (c.rerank_method, c.rerank_top_n) == ("off", 15)
+    section = pages["FreeCADAIProviderPrefs"].page.section
     idx = prov_mod.get_provider_names().index("github")
-    for order in (ALL, list(reversed(ALL))):
-        c = config_mod.get_config()
-        c.rerank_method, c.rerank_top_n = "off", 15
-        for p in pages.values():
-            p.loadSettings()
-        pages["FreeCADAIProviderPrefs"].page.section.provider_combo \
-            .setCurrentIndex(idx)
-        pages["FreeCADAIToolsPrefs"].page.rerank_method_combo \
-            .setCurrentIndex(2)      # llm, an explicit choice
-        for name in order:
-            pages[name].saveSettings()
-        assert config_mod.get_config().rerank_method == "llm"
+    assert section.provider_combo.currentIndex() != idx
+    section.provider_combo.setCurrentIndex(idx)
+    assert section._pending_rerank == {"method": "keyword", "top_n": 8}
+    tools = pages["FreeCADAIToolsPrefs"].page
+    if edit == "method":
+        tools.rerank_method_combo.setCurrentIndex(2)      # llm
+    else:
+        tools.rerank_top_n_spin.setValue(20)
+    names = ALL if order == "preferences" else list(reversed(ALL))
+    for name in names:
+        pages[name].saveSettings()
+    c = config_mod.get_config()
+    assert (c.rerank_method, c.rerank_top_n) == expected
+
+
+def test_provider_switch_alone_applies_the_preset_rerank(pages):
+    """The #10 default itself still lands when Tools is untouched."""
+    import freecad_ai.llm.providers as prov_mod
+    section = pages["FreeCADAIProviderPrefs"].page.section
+    section.provider_combo.setCurrentIndex(
+        prov_mod.get_provider_names().index("github"))
+    _ok(pages)
+    c = config_mod.get_config()
+    assert (c.rerank_method, c.rerank_top_n) == ("keyword", 8)
 
 
 class TestCloseHost:
