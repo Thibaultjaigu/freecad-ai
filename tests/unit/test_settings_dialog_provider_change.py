@@ -1,5 +1,5 @@
 """Regression tests for a provider switch: ProviderSection._on_provider_changed
-and the dialog's half of it, SettingsDialog._on_preset_applied (#99).
+and the dialog's half of it, ProviderPage._on_preset_applied (#99, #101).
 
 Issue #12 (xtc0r): switching the provider combo to "custom" was wiping the
 user's gateway URL and model, because the "custom" preset ships empty
@@ -34,7 +34,7 @@ from freecad_ai.config import (  # noqa: E402
 )
 from freecad_ai.llm.providers import get_provider_names  # noqa: E402
 from freecad_ai.ui.provider_section import ProviderSection  # noqa: E402
-from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.provider_page import ProviderPage  # noqa: E402
 
 
 class _Sig:
@@ -75,7 +75,7 @@ def _make_fake_dialog(model="my-model", profile=None):
     section.model_edit.text.return_value = model
     section.current_profile.return_value = profile
     return SimpleNamespace(
-        provider_section=section,
+        section=section,
         _cfg=AppConfig(),
         _load_model_params_table=MagicMock(),
     )
@@ -98,8 +98,8 @@ def test_switch_to_custom_preserves_fields():
 def test_preset_applied_reloads_the_table_for_the_field_model():
     """_load_model_params_table is called with whatever's in the field, not ""."""
     fake = _make_fake_dialog(model="my-model")
-    SettingsDialog._on_preset_applied(
-        cast(SettingsDialog, fake), PROVIDER_PRESETS["custom"])
+    ProviderPage._on_preset_applied(
+        cast(ProviderPage, fake), PROVIDER_PRESETS["custom"])
 
     fake._load_model_params_table.assert_called_once()
     args, _ = fake._load_model_params_table.call_args
@@ -138,8 +138,8 @@ def test_params_table_reload_gets_the_working_copy_profile():
     profile = ProviderConfig(name="ollama", model="qwen3:8b",
                              params={"top_k": 40})
     fake = _make_fake_dialog(profile=profile)
-    SettingsDialog._on_preset_applied(
-        cast(SettingsDialog, fake), PROVIDER_PRESETS["anthropic"])
+    ProviderPage._on_preset_applied(
+        cast(ProviderPage, fake), PROVIDER_PRESETS["anthropic"])
 
     args, kwargs = fake._load_model_params_table.call_args
     assert args[1] is fake._cfg

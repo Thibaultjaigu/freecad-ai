@@ -185,39 +185,39 @@ class TestProbesWriteToTheProbedProfile:
     job (TestProbeResult in test_provider_section.py)."""
 
     def test_vision_probe_writes_to_the_probed_profile(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.settings_pages.provider_page import ProviderPage
         cfg = _two_profiles()
         fake = _fake_dialog(cfg, shown="rerank")
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_vision_probed(fake, True)
+        ProviderPage._on_vision_probed(fake, True)
 
-        fake.provider_section.set_probe_result.assert_called_once_with(
+        fake.section.set_probe_result.assert_called_once_with(
             "rerank", vision=True)
 
     def test_capability_probe_writes_to_the_probed_profile(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.settings_pages.provider_page import ProviderPage
         cfg = _two_profiles()
         fake = _fake_dialog(cfg, shown="rerank")
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_capabilities_detected(
+        ProviderPage._on_capabilities_detected(
             fake, {"vision": False, "tools": False, "thinking": True})
 
-        fake.provider_section.set_probe_result.assert_called_once_with(
+        fake.section.set_probe_result.assert_called_once_with(
             "rerank", tools=False, thinking=True)
 
     def test_a_non_ollama_probe_reports_no_tools_or_thinking(self):
         """Non-Ollama providers emit only "vision": tools/thinking must
         stay unreported (None), not become False."""
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.settings_pages.provider_page import ProviderPage
         cfg = _two_profiles()
         fake = _fake_dialog(cfg, shown="rerank")
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_capabilities_detected(fake, {"vision": True})
+        ProviderPage._on_capabilities_detected(fake, {"vision": True})
 
-        fake.provider_section.set_probe_result.assert_called_once_with(
+        fake.section.set_probe_result.assert_called_once_with(
             "rerank")
 
 

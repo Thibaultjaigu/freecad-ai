@@ -13,7 +13,11 @@ state, so there is nothing left to roll back. The other three values
 never read by the probe at all; they simply stop being written.
 
 The fake self carries only what ``_test_connection`` touches, so no Qt dialog
-has to be constructed.
+has to be constructed. Since #101, ``_test_connection`` lives on
+``ProviderPage`` and reads ``max_tokens``/``thinking``/``temperature`` and
+``provider_keys`` off ``get_config()`` rather than a load-time snapshot,
+because the Behavior-tab widgets that used to carry the first two now live
+on a different page (a cross-page link Decision 3 rejects).
 """
 
 import dataclasses
@@ -32,6 +36,7 @@ except ImportError:
 
 from freecad_ai.config import AppConfig, ProviderConfig  # noqa: E402
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.provider_page import ProviderPage  # noqa: E402
 
 
 def _cfg():
@@ -49,20 +54,10 @@ def _fake(cfg):
     fake._cfg = cfg
     # The section's own copy of the shown profile, not cfg's: committing
     # into it is the only write Test Connection may make (#76, #99).
-    fake.provider_section.current_label.return_value = "cloud"
-    fake.provider_section.current_profile.return_value = ProviderConfig(
+    fake.section.current_label.return_value = "cloud"
+    fake.section.current_profile.return_value = ProviderConfig(
         name="anthropic", base_url="https://api.anthropic.com",
         api_key="typed-key", model="claude-sonnet-4-6")
-
-    # A MagicMock self no-ops every collaborator method, so `self._save_temp()`
-    # inside _test_connection would do nothing and every leak assertion below
-    # would pass vacuously. Bind the real helper while it still exists; after
-    # the fix there is none to bind and _test_connection calls no stand-in.
-    if hasattr(SettingsDialog, "_save_temp"):
-        fake._save_temp = lambda: SettingsDialog._save_temp(fake)
-    else:
-        del fake._save_temp
-
     return fake
 
 
@@ -76,13 +71,15 @@ def _run(monkeypatch, cfg):
         return MagicMock()
 
     monkeypatch.setattr(
-        "freecad_ai.ui.settings_dialog._TestConnectionThread", fake_thread)
-    # _save_temp reaches for the singleton, not self._cfg — point it at the
-    # same object so a leak is visible on cfg either way.
+        "freecad_ai.ui.settings_pages.provider_page._TestConnectionThread",
+        fake_thread)
+    # get_config() is what _test_connection reads for max_tokens/thinking/
+    # temperature/provider_keys since #101 — point it at the same object so
+    # a leak is visible on cfg either way.
     monkeypatch.setattr(
-        "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
+        "freecad_ai.ui.settings_pages.provider_page.get_config", lambda: cfg)
 
-    SettingsDialog._test_connection(_fake(cfg))
+    ProviderPage._test_connection(_fake(cfg))
     return captured
 
 
@@ -126,9 +123,11 @@ class TestTheLiveConfigIsLeftAlone:
 
 
 class TestTheProbeStillUsesTheEditedValues:
-    """max_tokens and thinking now read straight off ``self._cfg`` (#101's
-    Task 6), the same way temperature always has below — there is no
-    Behavior-tab widget left to read instead."""
+    """max_tokens and thinking now read straight off ``get_config()`` (#101's
+    Ruling 1) — the Behavior-tab widgets that used to carry them live on a
+    different page now, so reading them from ProviderPage would be a
+    cross-page link. temperature is unaffected: it has always come from the
+    saved config, the same way, below."""
 
     def test_max_tokens_comes_from_the_saved_config(self, monkeypatch):
         cfg = _cfg()
@@ -160,15 +159,18 @@ class TestTheProbeCommitsTheSectionFirst:
         cfg = _cfg()
         fake = _fake(cfg)
         order = []
-        prof = fake.provider_section.current_profile.return_value
-        fake.provider_section.commit.side_effect = (
+        prof = fake.section.current_profile.return_value
+        fake.section.commit.side_effect = (
             lambda: order.append("commit"))
-        fake.provider_section.current_profile.side_effect = (
+        fake.section.current_profile.side_effect = (
             lambda: order.append("read") or prof)
         monkeypatch.setattr(
-            "freecad_ai.ui.settings_dialog._TestConnectionThread",
+            "freecad_ai.ui.settings_pages.provider_page._TestConnectionThread",
             lambda *a, **k: MagicMock())
-        SettingsDialog._test_connection(fake)
+        monkeypatch.setattr(
+            "freecad_ai.ui.settings_pages.provider_page.get_config",
+            lambda: cfg)
+        ProviderPage._test_connection(fake)
         assert order[:2] == ["commit", "read"]
 
 

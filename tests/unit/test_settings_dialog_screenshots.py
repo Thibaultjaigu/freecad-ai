@@ -68,7 +68,10 @@ RECORDED = {
         "checkboxes": ("Use this profile for chat", "Model supports vision"),
         "combos": 2, "spins": 0, "fields": 3, "buttons": 4},
     "Utility models": {
-        "checkboxes": (), "combos": 4, "spins": 0, "fields": 0, "buttons": 0},
+        # buttons: 1, not 0 -- Test Reranker moved into this group, beside
+        # the Reranker dropdown it tests, in #101's Task 7. Retake
+        # settings-dialog.png.
+        "checkboxes": (), "combos": 4, "spins": 0, "fields": 0, "buttons": 1},
     "Model Parameters": {
         # spins: 0, not 4 -- the four spin boxes moved into BehaviorPage's
         # own Limits group in #101's Task 6. Retake settings-dialog.png.
