@@ -222,6 +222,7 @@ class _LLMWorker(QThread):
         self._final_reasoning = ""  # thinking of the turn that ends the run (#84)
         self._tool_timeline = []  # timing data for summary visualization
         self._response_truncated = False  # response hit the output-token limit
+        self._response_max_tokens = None  # the cap the client ran with (#103)
 
     def run(self):
         try:
@@ -234,6 +235,9 @@ class _LLMWorker(QThread):
             # leaving and resuming a session.
             client = create_client_from_config(
                 cache_key=getattr(self.conversation, "conversation_id", ""))
+            # The truncation warning quotes this: the cap may come from a
+            # profile row, and cfg can change while the turn runs (#103).
+            self._response_max_tokens = client.max_tokens
             self._strip_thinking = should_strip_thinking(
                 client.model, _get_config().strip_thinking_history)
             self._optimize_caching = _get_config().optimize_prompt_caching
@@ -2347,7 +2351,8 @@ class ChatDockWidget(QDockWidget):
         # Warn when the model ran out of output budget mid-answer. Without this
         # the plan just stops mid-line with no explanation (issue #50).
         if self._worker and self._worker._response_truncated:
-            self._append_html(render_truncation_warning(get_config().max_tokens))
+            self._append_html(render_truncation_warning(
+                self._worker._response_max_tokens or get_config().max_tokens))
 
         # Tool call summary (after re-render so it's not wiped)
         if self._worker and self._worker._tool_timeline and not getattr(self, '_summary_rendered', False):

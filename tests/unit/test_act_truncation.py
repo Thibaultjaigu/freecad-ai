@@ -242,3 +242,30 @@ class TestToolLoopHaltsOnTruncation:
         worker = self._run(truncated=False, events=events)
         assert worker._response_truncated is False
         worker.response_finished.emit.assert_called_once()
+
+
+class TestTruncationWarningNamesTheAppliedCap:
+    """#103: the cap can come from a profile row, so the warning must quote
+    the client that ran, not cfg.max_tokens."""
+
+    def test_run_records_the_clients_cap(self, monkeypatch, tmp_config_dir):
+        import freecad_ai.llm.client as client_mod
+        from freecad_ai.ui.chat_widget import _LLMWorker
+        fake_client = SimpleNamespace(model="qwen3:8b", max_tokens=16000)
+        monkeypatch.setattr(client_mod, "create_client_from_config",
+                            lambda **k: fake_client)
+        worker = SimpleNamespace(
+            conversation=None, describe_fn=None, tools=[],
+            _simple_stream=lambda c: None, _tool_loop=lambda c: None,
+            error_occurred=MagicMock(), _response_max_tokens=None)
+        _LLMWorker.run(worker)  # type: ignore[arg-type]
+        worker.error_occurred.emit.assert_not_called()
+        assert worker._response_max_tokens == 16000
+
+    def test_the_warning_points_at_behavior_and_the_row(self):
+        from freecad_ai.ui.message_view import render_truncation_warning
+        html = render_truncation_warning(16000)
+        assert "16000 tokens" in html
+        assert "Settings → Behavior" in html
+        assert "max_tokens row" in html
+        assert "Model Parameters" not in html
