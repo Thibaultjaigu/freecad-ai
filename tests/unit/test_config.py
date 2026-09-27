@@ -1250,3 +1250,58 @@ class TestConfigListeners:
         notify_config_changed()
         notify_config_changed()
         assert calls == ["once", "other", "other"]
+
+
+class TestProfileContextWindow:
+    """#103: a profile may carry its own compaction threshold."""
+
+    def test_defaults_to_none(self):
+        assert ProviderConfig().context_window is None
+
+    def test_an_old_profile_without_the_key_loads_none(self):
+        from freecad_ai.config import _profile_from_dict
+        assert _profile_from_dict({"name": "ollama"}).context_window is None
+
+    def test_a_small_hand_edit_is_kept(self):
+        from freecad_ai.config import _profile_from_dict
+        assert _profile_from_dict({"context_window": 3000}).context_window == 3000
+
+    @pytest.mark.parametrize("bad", ["x", 0, -1, True, 2.5])
+    def test_bad_values_load_as_none_with_a_warning(self, bad, caplog):
+        from freecad_ai.config import _profile_from_dict
+        assert _profile_from_dict({"context_window": bad}).context_window is None
+        assert "context_window" in caplog.text
+
+    def test_null_and_3000_survive_a_save(self, tmp_config_dir):
+        c = AppConfig()
+        c.profiles = {"a": ProviderConfig(context_window=None),
+                      "b": ProviderConfig(context_window=3000)}
+        c.active_profile = "a"
+        save_config(c)
+        with open(config_mod.CONFIG_FILE) as f:
+            raw = json.load(f)
+        assert raw["profiles"]["a"]["context_window"] is None
+        loaded = load_config()
+        assert loaded.profiles["a"].context_window is None
+        assert loaded.profiles["b"].context_window == 3000
+
+
+class TestCompactionThreshold:
+    def _cfg(self):
+        c = AppConfig()
+        c.context_window = 20000
+        c.profiles = {"chat": ProviderConfig(context_window=150000),
+                      "cheap": ProviderConfig(context_window=8000)}
+        c.active_profile = "chat"
+        c.utility_profiles = {"compaction": "cheap"}
+        return c
+
+    def test_comes_from_the_active_profile_not_the_compaction_one(self):
+        from freecad_ai.config import compaction_threshold
+        assert compaction_threshold(self._cfg()) == 150000
+
+    def test_none_falls_back_to_the_global_value(self):
+        from freecad_ai.config import compaction_threshold
+        c = self._cfg()
+        c.profiles["chat"].context_window = None
+        assert compaction_threshold(c) == 20000

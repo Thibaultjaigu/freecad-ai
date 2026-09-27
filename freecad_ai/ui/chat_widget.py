@@ -34,8 +34,8 @@ Slot = QtCore.Slot
 QFont = QtGui.QFont
 QTextCursor = QtGui.QTextCursor
 
-from ..config import (LOGS_DIR, add_config_listener, get_config,
-                      prune_oldest_files, remove_config_listener,
+from ..config import (LOGS_DIR, add_config_listener, compaction_threshold,
+                      get_config, prune_oldest_files, remove_config_listener,
                       save_current_config)
 from ..core.conversation import Conversation
 from ..core.executor import extract_code_blocks, extract_truncated_block, execute_code
@@ -1492,7 +1492,7 @@ class ChatDockWidget(QDockWidget):
 
         # Check if conversation needs compaction
         cfg = get_config()
-        if self.conversation.needs_compaction(cfg.context_window):
+        if self.conversation.needs_compaction(compaction_threshold(cfg)):
             self._compact_and_send()
             return
 

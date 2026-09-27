@@ -394,6 +394,10 @@ class ProviderConfig:
     vision_override: bool | None = None   # user manual override, wins
     tools_detected: bool | None = None    # Ollama /api/show "tools"
     thinking_detected: bool | None = None  # Ollama /api/show "thinking"
+    # Compaction threshold for conversations on this profile, in tokens.
+    # Client-side only — never sent to a vendor. None = use the global
+    # AppConfig.context_window (#103).
+    context_window: int | None = None
 
     CAPABILITY_FIELDS = ("vision_detected", "vision_override",
                          "tools_detected", "thinking_detected")
@@ -426,7 +430,27 @@ def _profile_from_dict(raw) -> "ProviderConfig":
             "Ignoring unrecognised profile field(s) %s — most likely written "
             "by a newer version of the workbench.",
             ", ".join(sorted(unknown)))
-    return ProviderConfig(**{k: v for k, v in raw.items() if k in known})
+    kept = {k: v for k, v in raw.items() if k in known}
+    cw = kept.get("context_window")
+    if cw is not None and (isinstance(cw, bool) or not isinstance(cw, int)
+                           or cw <= 0):
+        logger.warning(
+            "Profile context_window %s is not a positive integer — using "
+            "the global value instead.", json.dumps(cw, default=str))
+        kept["context_window"] = None
+    return ProviderConfig(**kept)
+
+
+def compaction_threshold(cfg) -> int:
+    """Token count above which the conversation is compacted.
+
+    Read from the *active chat* profile, never from the compaction
+    utility's profile: the question is whether this conversation is too
+    big for the model being talked to. Who writes the summary is a
+    separate setting (#103).
+    """
+    own = cfg.provider.context_window
+    return own if own else cfg.context_window
 
 
 _OMIT = object()          # "this value cannot go in the file"
