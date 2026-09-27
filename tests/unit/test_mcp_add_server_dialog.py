@@ -12,7 +12,7 @@ except ImportError:
     except ImportError:
         pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
 
-from freecad_ai.ui.settings_dialog import _AddMCPServerDialog, SettingsDialog
+from freecad_ai.ui.settings_pages.mcp_page import _AddMCPServerDialog, McpPage
 
 
 class TestApplyTransportVisibility:
@@ -92,13 +92,13 @@ class TestGetConfig:
 
 class TestMcpListLabel:
     def test_url_transport_shows_url(self):
-        label = SettingsDialog._mcp_list_label(
+        label = McpPage._mcp_list_label(
             {"name": "remote", "transport": "sse", "url": "https://h/sse"})
         assert "https://h/sse" in label
         assert "[sse]" in label
 
     def test_stdio_transport_shows_command(self):
-        label = SettingsDialog._mcp_list_label(
+        label = McpPage._mcp_list_label(
             {"name": "fs", "command": "npx", "args": ["-y", "srv"]})
         assert "npx" in label
 

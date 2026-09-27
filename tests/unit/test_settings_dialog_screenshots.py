@@ -52,6 +52,7 @@ WIKI_IMAGE = {
     "Behavior": ("settings-dialog-2.png",),
     "Tool Reranking": ("settings-dialog-2.png",),
     "MCP Servers": ("settings-dialog-2.png", "settings-dialog-3.png"),
+    "Built-in MCP Server": ("settings-dialog-2.png", "settings-dialog-3.png"),
     "Editor": ("settings-dialog-2.png", "settings-dialog-3.png"),
     "User Tools": ("settings-dialog-2.png", "settings-dialog-3.png"),
     "Skills": ("settings-dialog-3.png",),
@@ -86,7 +87,9 @@ RECORDED = {
     "Tool Reranking": {
         "checkboxes": (), "combos": 1, "spins": 1, "fields": 1, "buttons": 1},
     "MCP Servers": {
-        "checkboxes": (), "combos": 0, "spins": 0, "fields": 4, "buttons": 5},
+        "checkboxes": (), "combos": 0, "spins": 0, "fields": 0, "buttons": 3},
+    "Built-in MCP Server": {
+        "checkboxes": (), "combos": 0, "spins": 0, "fields": 4, "buttons": 2},
     "Editor": {
         "checkboxes": (
             "Open hooks and user tools in the OS-default editor (instead of "
