@@ -33,6 +33,9 @@ class ToolsPage(SettingsPage):
         self._skills_status = []
         self.host_can_close = lambda: True
         self._cfg = None
+        # The reranker pair as read from the config, which may hold a
+        # value the combo cannot show (see apply_to).
+        self._loaded_rerank = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -204,6 +207,8 @@ class ToolsPage(SettingsPage):
 
     def _show(self, cfg, label):
         self._cfg = cfg
+        self._loaded_rerank = {"rerank_method": cfg.rerank_method,
+                               "rerank_top_n": cfg.rerank_top_n}
         m = cfg.rerank_method
         self.rerank_method_combo.setCurrentIndex(
             _RERANK_METHODS.index(m) if m in _RERANK_METHODS else 0)
@@ -232,15 +237,20 @@ class ToolsPage(SettingsPage):
         whichever of the two is still at its factory value, so writing
         just the edited one would let the preset's other half survive
         when Provider saves first. Written together, the pair on screen
-        wins whichever page saves last."""
+        wins whichever page saves last. The unedited half is the value
+        as loaded, not as the widget shows it, so a hand-edited method
+        the combo cannot show (say "semantic") survives a top_n edit;
+        it still predates any preset the Provider page just applied."""
         super().apply_to(cfg)
         if self._baseline is None:
             return
         values = self._values()
         pair = ("rerank_method", "rerank_top_n")
-        if any(values[k] != self._baseline.get(k) for k in pair):
+        edited = [k for k in pair if values[k] != self._baseline.get(k)]
+        if edited:
             for k in pair:
-                setattr(cfg, k, values[k])
+                setattr(cfg, k, values[k] if k in edited
+                        else self._loaded_rerank[k])
 
     # --- User Tools methods ---
 

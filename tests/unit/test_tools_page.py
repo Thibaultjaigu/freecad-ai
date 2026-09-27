@@ -96,6 +96,17 @@ def test_a_reranker_edit_writes_method_and_top_n_together(page, edit):
     assert target.use_external_editor is True
 
 
+def test_a_hand_edited_method_survives_a_top_n_edit(page):
+    """The pair write takes the unedited half from the config as loaded,
+    not from the widget, so a value the combo cannot show survives."""
+    cfg = AppConfig()
+    cfg.rerank_method = "semantic"     # hand-edited, shown as "off"
+    page.load(cfg)
+    page.rerank_top_n_spin.setValue(20)
+    page.apply_to(cfg)
+    assert (cfg.rerank_method, cfg.rerank_top_n) == ("semantic", 20)
+
+
 class TestEditorPrompt:
     def _answer(self, monkeypatch, button):
         monkeypatch.setattr(tp_mod.QMessageBox, "question",
