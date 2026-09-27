@@ -180,6 +180,19 @@ class _Edit:
         self._t = t
 
 
+class _Spin:
+    """Minimal stand-in for QSpinBox (the #103 Compact above field)."""
+
+    def __init__(self, value=0):
+        self._v = value
+
+    def value(self):
+        return self._v
+
+    def setValue(self, v):
+        self._v = v
+
+
 class _Combo:
     """QComboBox stand-in that records the order of calls made to it.
 
@@ -303,6 +316,7 @@ class TestProfileFieldRoundTrip:
             base_url_edit=_Edit(prof.base_url),
             api_key_edit=_Edit(prof.api_key),
             model_edit=_Edit(prof.model),
+            compact_above_spin=_Spin(),
             provider_combo=_Combo(get_provider_names().index(prof.name)),
             profile_active_check=_Check(),
             profileShown=_Sig(),
@@ -702,6 +716,7 @@ def _selector_fake(cfg, label="cloud"):
         api_key_edit=_Edit(),
         base_url_edit=_Edit(),
         model_edit=_Edit(),
+        compact_above_spin=_Spin(),
         provider_combo=_Combo(get_provider_names().index("anthropic")),
         utility_combos={},
         profileShown=_Sig(),

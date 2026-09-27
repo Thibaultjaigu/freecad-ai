@@ -436,3 +436,82 @@ class TestRerankDefaults:
         out = AppConfig()
         section.apply_to(out)
         assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+
+def _cw_cfg():
+    cfg = _cfg()
+    cfg.profiles["cloud"].context_window = 3000     # a hand edit below 4000
+    return cfg
+
+
+class TestCompactAbove:
+    """#103: the per-profile compaction threshold."""
+
+    def _label(self, section):
+        form = section.compact_above_spin.parentWidget().layout()
+        return form.labelForField(section.compact_above_spin).text()
+
+    def test_label_special_text_and_range(self, section):
+        spin = section.compact_above_spin
+        assert self._label(section) == "Compact above:"
+        assert spin.specialValueText() == "Use global"
+        assert (spin.minimum(), spin.maximum()) == (0, 1000000)
+        assert spin.singleStep() == 10000
+        assert "Behavior" in spin.toolTip()
+
+    def test_each_profile_shows_its_own_value(self, section):
+        section.load(_cw_cfg())
+        assert section.compact_above_spin.value() == 3000
+        section.profile_combo.setCurrentIndex(
+            section.profile_combo.findData("local"))
+        assert section.compact_above_spin.value() == 0
+
+    def test_untouched_load_is_clean(self, section):
+        section.load(_cw_cfg())
+        assert section.is_dirty() is False
+
+    def test_a_hand_edit_survives_an_unrelated_edit(self, section):
+        section.load(_cw_cfg())
+        section.base_url_edit.setText("http://elsewhere/v1")
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].context_window == 3000
+
+    def test_zero_saves_none(self, section):
+        section.load(_cw_cfg())
+        section.compact_above_spin.setValue(0)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].context_window is None
+
+    def test_a_typed_small_value_is_raised_to_4000(self, section):
+        section.load(_cw_cfg())
+        section.compact_above_spin.setValue(1500)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].context_window == 4000
+
+    def test_a_typed_value_is_saved(self, section):
+        section.load(_cw_cfg())
+        section.compact_above_spin.setValue(150000)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].context_window == 150000
+
+    def test_a_reverted_edit_is_clean(self, section):
+        section.load(_cw_cfg())
+        section.compact_above_spin.setValue(80000)
+        assert section.is_dirty() is True
+        section.compact_above_spin.setValue(3000)
+        assert section.is_dirty() is False
+
+    def test_an_edit_follows_its_profile_across_a_switch(self, section):
+        section.load(_cw_cfg())
+        section.compact_above_spin.setValue(80000)
+        section.profile_combo.setCurrentIndex(
+            section.profile_combo.findData("local"))
+        assert section.compact_above_spin.value() == 0
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].context_window == 80000
+        assert out.profiles["local"].context_window is None

@@ -68,8 +68,9 @@ WIKI_IMAGE = {
 # appearing or leaving without pinning every string in the dialog.
 RECORDED = {
     "LLM Provider": {
+        # spins: 1 -- "Compact above" joined the group in #103.
         "checkboxes": ("Use this profile for chat", "Model supports vision"),
-        "combos": 2, "spins": 0, "fields": 3, "buttons": 4},
+        "combos": 2, "spins": 1, "fields": 3, "buttons": 4},
     "Utility models": {
         # buttons: 1, not 0 -- Test Reranker moved into this group, beside
         # the Reranker dropdown it tests, in #101's Task 7.
