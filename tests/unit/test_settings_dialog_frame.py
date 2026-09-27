@@ -97,6 +97,29 @@ def test_a_declined_veto_saves_nothing(dialog, calls, monkeypatch):
     assert config_mod.get_config().max_tokens != 8192
 
 
+def test_a_page_that_fails_to_load_does_not_stop_the_dialog(
+        qapp, tmp_config_dir, calls):
+    """A hand-edited config the Tools page cannot show must not keep the
+    gear button from opening Settings; the other pages still save, and
+    the failed page writes nothing."""
+    import json
+    with open(config_mod.CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump({"rerank_top_n": "8"}, f)
+    config_mod._config = None
+    assert config_mod.get_config().rerank_top_n == "8"
+    d = sd.SettingsDialog()
+    try:
+        assert d.tools_page._baseline is None
+        assert d.behavior_page._baseline is not None
+        d.behavior_page.max_tokens_spin.setValue(8192)
+        d._save()
+        cfg = config_mod.get_config()
+        assert cfg.max_tokens == 8192
+        assert cfg.rerank_top_n == "8"
+    finally:
+        d.deleteLater()
+
+
 def test_close_requested(dialog, monkeypatch):
     seen = []
     monkeypatch.setattr(dialog, "_save", lambda: seen.append("save"))

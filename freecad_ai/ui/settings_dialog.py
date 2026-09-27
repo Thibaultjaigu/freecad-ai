@@ -107,7 +107,20 @@ class SettingsDialog(QDialog):
     def _load_from_config(self):
         cfg = get_config()
         for page in self._pages():
-            page.load(cfg)
+            # A page that cannot show the config (say a hand-edited
+            # "rerank_top_n": "8") keeps its baseline None and writes
+            # nothing; the others must still open and save. Same rule as
+            # the Preferences pages (_PrefsPageBase._load).
+            try:
+                page.load(cfg)
+            except Exception as e:
+                try:
+                    import FreeCAD
+                    FreeCAD.Console.PrintError(
+                        f"FreeCAD AI: {type(page).__name__} settings failed "
+                        f"to load: {e}\n")
+                except ImportError:
+                    pass
 
     @staticmethod
     def _profiles_missing_base_url(profiles) -> list:
