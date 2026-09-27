@@ -89,8 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   would actually send — a provider default, or the global temperature —
   for a profile with no params of its own, so you can see it; committing
   that unedited preview silently pinned it onto the profile as an explicit
-  override. The Settings dialog and both Preferences windows now write the
-  table back only when it has actually changed (#101).
+  override. The Settings dialog and the Preferences Provider page now write
+  the table back only when it has actually changed (#101).
 
 ## [0.30.0-alpha] - 2026-09-23
 
