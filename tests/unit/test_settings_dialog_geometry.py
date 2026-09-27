@@ -52,7 +52,7 @@ def _right_edge_in(widget, container):
 def test_every_profile_button_is_visible_at_the_default_size(dialog, button):
     # Delete is the rightmost and so the first to be clipped, but the row is
     # translated: in another locale a different one runs off the edge first.
-    btn = getattr(dialog, button)
+    btn = getattr(dialog.provider_section, button)
     assert _right_edge_in(btn, dialog) <= dialog.width(), (
         "%s extends past the dialog's right edge" % button)
 

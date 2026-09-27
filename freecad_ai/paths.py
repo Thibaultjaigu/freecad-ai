@@ -50,13 +50,3 @@ def get_icons_dir() -> str:
         if os.path.isdir(p):
             return p
     return ""
-
-
-def get_prefs_ui_path() -> str:
-    """Get the path to the preferences page .ui file, or empty string."""
-    wb = get_wb_dir()
-    if wb:
-        p = os.path.join(wb, "resources", "panels", "FreeCADAIPrefs.ui")
-        if os.path.exists(p):
-            return p
-    return ""

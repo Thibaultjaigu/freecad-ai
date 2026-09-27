@@ -50,7 +50,6 @@ def _fake_save_dialog(prompt_cache, log_usage):
     fake.rerank_pinned_edit.text.return_value = ""
     # Unpacked into two names, so a bare MagicMock is a ValueError.
     fake._parse_server_address.return_value = ("127.0.0.1", 8765)
-    fake.utility_combos = {}
     fake.prompt_cache_check.isChecked.return_value = prompt_cache
     fake.log_usage_check.isChecked.return_value = log_usage
     return fake

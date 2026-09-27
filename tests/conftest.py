@@ -36,10 +36,11 @@ def tmp_config_dir(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def reset_config_singleton():
-    """Reset the config singleton after each test."""
+    """Reset the config singleton and its listeners after each test."""
     yield
     import freecad_ai.config as config_mod
     config_mod._config = None
+    config_mod._config_listeners.clear()
 
 
 @pytest.fixture

@@ -696,8 +696,9 @@ class AppConfig:
 
         Every ``cfg.provider.*`` read and write in the codebase means "the
         active chat connection", so they all keep working through here.
-        Reads AND writes: the FreeCAD parameter-store bridge assigns to
-        ``cfg.provider.model`` etc., and those land in the stored profile.
+        Reads AND writes: the one-time parameter-store migration (#99)
+        assigns to ``cfg.provider.model`` etc., and those land in the
+        stored profile.
         """
         self._ensure_profile()
         return self.profiles[self.active_profile]
@@ -866,36 +867,35 @@ def _ensure_dirs():
 def load_config() -> AppConfig:
     """Load configuration from disk. Returns defaults if file doesn't exist.
 
-    After loading from JSON, layers any values present in FreeCAD's parameter
-    store (BaseApp/Preferences/Mod/FreeCADAI) on top — so changes the user
-    made via Edit → Preferences propagate to the workbench's settings on
-    next load even though they're written by FreeCAD's Pref* widgets.
-
-    Then mirrors the merged result back to the parameter store so the
-    Edit → Preferences page (which reads Pref* widgets directly from the
-    param store) reflects current values. Without this, users upgrading
-    from a version without the bridge would see blank fields in the
-    preferences page until they saved through the AI Settings dialog.
+    Then runs the one-time migration of values an old Edit → Preferences
+    page left in FreeCAD's parameter store (#99).
     """
     _ensure_dirs()
     cfg = AppConfig()
+    config_loaded_ok = True
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
             cfg = AppConfig.from_dict(data)
         except (json.JSONDecodeError, TypeError, KeyError):
-            pass
+            # A broken-but-repairable config.json falls back to bare
+            # defaults here, same as always. But migrating on top of that
+            # and saving would replace the broken file with defaults --
+            # destroying whatever the user could otherwise have fixed.
+            # Skip the migration; the param-store group stays untouched,
+            # so it is retried once the file is readable again.
+            config_loaded_ok = False
     # (The pre-namespace rerank_params seeding that used to live here now
     # runs inside _migrate_flat_provider, where the profile that actually
     # reads those params is built. rerank_params itself is legacy.)
-    _apply_param_store_overrides(cfg)
-    _write_to_param_store(cfg)
+    if config_loaded_ok:
+        _migrate_param_store(cfg)
     return cfg
 
 
 def save_config(config: AppConfig):
-    """Save configuration to disk and mirror to FreeCAD's parameter store.
+    """Save configuration to disk.
 
     Serialise first, write second, and write through a temp file. This
     used to be ``json.dump(config.to_dict(), open(CONFIG_FILE, "w"))``,
@@ -917,63 +917,83 @@ def save_config(config: AppConfig):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    _write_to_param_store(config)
 
 
-# ── FreeCAD parameter-store bridge ──────────────────────────────────────
+# ── One-time migration off FreeCAD's parameter store (#99) ──────────────
 #
-# Edit → Preferences uses Gui::Pref* widgets that auto-save to
-# BaseApp/Preferences/Mod/FreeCADAI/. AppConfig stores everything in JSON
-# at ~/.config/FreeCAD/FreeCADAI/config.json. We mirror the subset of
-# fields exposed in the preferences page so both UIs stay coherent.
+# Until #99, Edit → Preferences was a .ui of Gui::Pref* widgets storing
+# eight values under BaseApp/Preferences/Mod/FreeCADAI, mirrored into
+# config.json on each load. The page now writes config.json itself. A
+# value changed there under an old version, and not yet mirrored, exists
+# only in the store — so apply it once, then remove the group. Its absence
+# is the marker; no version flag is needed.
 #
-# Indices stored in the param store correspond to the order of items in
-# resources/panels/FreeCADAIPrefs.ui — keep these lists in sync.
-
-#
-# _PARAM_PROVIDERS must equal PROVIDERS (the Settings dialog's list), order
-# included. It used to be a 12-provider subset, and a profile on any of the
-# other ten was switched to "anthropic" by the next OK in Edit → Preferences:
-# the combo can't show the provider, so it shows its first item and writes
-# that back (#97). Append only -- the stored ProviderIndex is positional.
-
-_PARAM_PROVIDERS = [
+# Frozen copies of the old combos' item orders. The stored indices are
+# positional, so these never change, whatever happens to PROVIDERS.
+_LEGACY_PARAM_PROVIDERS = (
     "anthropic", "openai", "ollama", "gemini", "openrouter",
     "moonshot", "deepseek", "qwen", "groq", "mistral", "together",
     "cloudflare-workers-ai",
-    # added in #97
+    # appended in #97
     "fireworks", "xai", "cohere", "sambanova", "minimax", "llama",
     "github", "huggingface", "zhipu", "custom",
-]
-_PARAM_MODES = ["plan", "act"]
-_PARAM_THINKING = ["off", "on", "extended"]
+)
+_LEGACY_PARAM_MODES = ("plan", "act")
+_LEGACY_PARAM_THINKING = ("off", "on", "extended")
 
 
 def _get_param_group():
-    """Return the FreeCAD ParamGet group, or None when running outside FreeCAD."""
+    """Return the legacy ParamGet group, or None when absent or outside FreeCAD.
+
+    ParamGet creates a missing group, and FreeCAD writes it to user.cfg at
+    exit -- so HasGroup first, or every start resurrects the retired store.
+    """
     try:
         import FreeCAD
-        return FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/FreeCADAI")
+        mod = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod")
+        if not mod.HasGroup("FreeCADAI"):
+            return None
+        return mod.GetGroup("FreeCADAI")
     except (ImportError, RuntimeError):
         return None
 
 
-def _apply_param_store_overrides(cfg: AppConfig) -> None:
-    """Layer ParamGet values onto cfg for fields exposed in the prefs page.
+def _remove_param_group() -> None:
+    """Delete Mod/FreeCADAI from FreeCAD's parameters, and save user.cfg.
 
-    Only overrides when the param store has an explicit value. The Pref*
-    widgets only write on first interaction, so an unset key means the user
-    hasn't touched the preferences page — JSON value stays authoritative.
+    RemGroup only edits the in-memory parameter tree -- FreeCAD normally
+    writes user.cfg at clean exit, so without the explicit save the API
+    key would stay on disk (and, on a crash before exit, get re-applied
+    by the migration on the next start). saveParameter() persists the
+    removal to user.cfg immediately, so the key leaves disk now.
+    """
+    try:
+        import FreeCAD
+        FreeCAD.ParamGet(
+            "User parameter:BaseApp/Preferences/Mod").RemGroup("FreeCADAI")
+        FreeCAD.saveParameter()
+    except (ImportError, RuntimeError, AttributeError):
+        pass
+
+
+def _migrate_param_store(cfg: AppConfig) -> None:
+    """Apply what an old preferences page left in the store, once.
+
+    Only keys present are applied: #12 — a missing ProviderIndex is not
+    "index 0", it means the page never wrote one. Out-of-range indices are
+    ignored. A failed save keeps the group, so the next start retries.
     """
     group = _get_param_group()
     if group is None:
         return
     keys = set(group.GetStrings()) | set(group.GetInts()) | set(group.GetBools())
+    if not keys:
+        return
 
     if "ProviderIndex" in keys:
         idx = group.GetInt("ProviderIndex", 0)
-        if 0 <= idx < len(_PARAM_PROVIDERS):
-            cfg.provider.name = _PARAM_PROVIDERS[idx]
+        if 0 <= idx < len(_LEGACY_PARAM_PROVIDERS):
+            cfg.provider.name = _LEGACY_PARAM_PROVIDERS[idx]
     if "Model" in keys:
         cfg.provider.model = group.GetString("Model", cfg.provider.model)
     if "BaseUrl" in keys:
@@ -982,48 +1002,28 @@ def _apply_param_store_overrides(cfg: AppConfig) -> None:
         cfg.provider.api_key = group.GetString("ApiKey", cfg.provider.api_key)
     if "ModeIndex" in keys:
         idx = group.GetInt("ModeIndex", 0)
-        if 0 <= idx < len(_PARAM_MODES):
-            cfg.mode = _PARAM_MODES[idx]
+        if 0 <= idx < len(_LEGACY_PARAM_MODES):
+            cfg.mode = _LEGACY_PARAM_MODES[idx]
     if "ThinkingIndex" in keys:
         idx = group.GetInt("ThinkingIndex", 0)
-        if 0 <= idx < len(_PARAM_THINKING):
-            cfg.thinking = _PARAM_THINKING[idx]
+        if 0 <= idx < len(_LEGACY_PARAM_THINKING):
+            cfg.thinking = _LEGACY_PARAM_THINKING[idx]
     if "MaxTokens" in keys:
         cfg.max_tokens = group.GetInt("MaxTokens", cfg.max_tokens)
     if "EnableTools" in keys:
         cfg.enable_tools = group.GetBool("EnableTools", cfg.enable_tools)
 
-
-def _write_to_param_store(cfg: AppConfig) -> None:
-    """Mirror cfg values to ParamGet so the preferences page reflects them.
-
-    Lets the user open Edit → Preferences after using the Settings dialog
-    and see current values rather than stale Pref widget defaults.
-    """
-    group = _get_param_group()
-    if group is None:
+    try:
+        save_config(cfg)
+    except OSError as e:
+        logger.warning(
+            "FreeCAD AI: could not save preferences migrated from FreeCAD's "
+            "parameter store (%s); will retry at next start", e)
         return
-    if cfg.provider.name in _PARAM_PROVIDERS:
-        group.SetInt("ProviderIndex", _PARAM_PROVIDERS.index(cfg.provider.name))
-    else:
-        # Provider isn't representable in the prefs combo. Since #97 every
-        # preset is, so this only catches names that aren't presets (a
-        # config from a newer version, a hand edit). Clear any stale index
-        # left over from a previous prefs-page interaction so the load path
-        # doesn't shadow the JSON name with a wrong provider. See #12.
-        try:
-            group.RemInt("ProviderIndex")
-        except (AttributeError, RuntimeError):
-            pass
-    group.SetString("Model", cfg.provider.model)
-    group.SetString("BaseUrl", cfg.provider.base_url)
-    group.SetString("ApiKey", cfg.provider.api_key)
-    if cfg.mode in _PARAM_MODES:
-        group.SetInt("ModeIndex", _PARAM_MODES.index(cfg.mode))
-    if cfg.thinking in _PARAM_THINKING:
-        group.SetInt("ThinkingIndex", _PARAM_THINKING.index(cfg.thinking))
-    group.SetInt("MaxTokens", int(cfg.max_tokens))
-    group.SetBool("EnableTools", bool(cfg.enable_tools))
+    # RemGroup only detaches a group a Python handle still holds, and the
+    # next save writes it back -- so release ours first.
+    del group
+    _remove_param_group()
 
 
 # Singleton config instance
@@ -1048,3 +1048,40 @@ def reload_config():
     """Force reload configuration from disk."""
     global _config
     _config = load_config()
+
+
+# ── Config-changed notification (#99) ───────────────────────────────────
+#
+# The Settings dialog and the Edit → Preferences page both save the live
+# config; whoever shows state derived from it (the chat panel) registers
+# here instead of each window knowing about every consumer.
+
+_config_listeners: list = []
+
+
+def add_config_listener(fn) -> None:
+    """Call ``fn()`` after every notify_config_changed(). Idempotent."""
+    if fn not in _config_listeners:
+        _config_listeners.append(fn)
+
+
+def remove_config_listener(fn) -> None:
+    """Stop calling ``fn``. Unknown listeners are ignored."""
+    try:
+        _config_listeners.remove(fn)
+    except ValueError:
+        pass
+
+
+def notify_config_changed() -> None:
+    """Tell every listener the config was saved.
+
+    Iterates over a copy, so a listener may remove itself. One that raises
+    is logged and skipped: a closed panel's stale listener must not stop
+    the others from refreshing.
+    """
+    for fn in list(_config_listeners):
+        try:
+            fn()
+        except Exception:
+            logger.exception("FreeCAD AI: config listener %r failed", fn)

@@ -6,10 +6,9 @@ OpenAI-compatible /chat/completions endpoints), and whether it
 supports native tool calling.
 """
 
-# Order matters: it is the Settings dialog's provider list, and it must
-# equal config._PARAM_PROVIDERS and the combo in FreeCADAIPrefs.ui, whose
-# positions are stored in users' param stores (#97). New providers go at
-# the end, never in the middle.
+# Order is the Settings dialog's provider list and nothing else: since #99
+# no position is stored anywhere. (The parameter-store positions from
+# before #99 live on, frozen, in config._LEGACY_PARAM_PROVIDERS.)
 PROVIDERS = {
     "anthropic": {
         "base_url": "https://api.anthropic.com",

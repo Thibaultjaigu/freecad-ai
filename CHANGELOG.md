@@ -30,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   file was found in; previously a single base directory was computed for the
   whole load, which in merge mode would hand every file the same neighbour.
 
+### Changed
+
+- **Edit → Preferences → FreeCAD AI now shows profiles and utility models**,
+  the same *LLM Provider* and *Utility models* sections as the Settings
+  dialog, built from one shared widget so the two can no longer differ.
+  An OK in Preferences that changed nothing on this page writes nothing
+  (#99). The chat panel now refreshes from a config-changed notification, so
+  a save from Preferences updates it too, the same as the Settings dialog
+  always did.
+- **FreeCAD's `user.cfg` no longer holds FreeCAD AI settings.** They used
+  to be mirrored under `BaseApp/Preferences/Mod/FreeCADAI`; `config.json`
+  is now the only store. A value changed in Preferences under an older
+  version is carried over once at the first start, and the group — API
+  key included — is then removed. If `config.json` exists but can't be
+  parsed, the migration is skipped and retried once the file is fixed, so
+  it never overwrites a broken `config.json`. Scripts reading
+  `ParamGet(".../Mod/FreeCADAI")` stop seeing values (#99).
+
 ### Fixed
 
 - **Clicking OK in Edit → Preferences no longer switches your connection
@@ -43,7 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   did not cover. Both lists now hold every provider, in the same order.
   Existing preference values keep their meaning; the ten providers were
   appended, and Cloudflare Workers AI moved down in the Settings dialog to
-  match.
+  match. Since #99 the page shares the Settings dialog's provider list, so
+  the lists cannot diverge again.
 
 ## [0.30.0-alpha] - 2026-09-23
 

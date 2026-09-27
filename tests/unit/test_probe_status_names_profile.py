@@ -58,13 +58,11 @@ def _fake_rerank_dialog(cfg, selection, monkeypatch):
     monkeypatch.setattr(
         "freecad_ai.ui.settings_dialog._TestRerankerThread",
         lambda *a, **kw: mock.MagicMock())
-    combo = mock.MagicMock()
-    combo.currentData.return_value = selection
     fake = mock.MagicMock()
     fake._cfg = cfg
-    fake._profiles = cfg.profiles
-    fake._active_profile = cfg.active_profile
-    fake.utility_combos = {"rerank": combo}
+    fake.provider_section.profiles.return_value = cfg.profiles
+    fake.provider_section.active_label.return_value = cfg.active_profile
+    fake.provider_section.utility_selection.return_value = selection
     _bind_helpers(fake)
     return fake
 
@@ -76,12 +74,10 @@ def _fake_connection_dialog(cfg, displayed, monkeypatch):
         lambda *a, **kw: mock.MagicMock())
     fake = mock.MagicMock()
     fake._cfg = cfg
-    fake._current_profile_label = displayed
-    fake.provider_combo.currentIndex.return_value = 0
-    fake.base_url_edit.text.return_value = "https://api.anthropic.com"
-    fake.api_key_edit.text.return_value = ""
-    fake.model_edit.text.return_value = "claude-sonnet-4-6"
-    fake._read_model_params_table.return_value = {}
+    fake.provider_section.current_label.return_value = displayed
+    fake.provider_section.current_profile.return_value = ProviderConfig(
+        name="anthropic", base_url="https://api.anthropic.com", api_key="",
+        model="claude-sonnet-4-6")
     # _test_connection indexes _THINKING_VALUES with this, so a MagicMock
     # index would be a TypeError rather than a probe.
     fake.thinking_combo.currentIndex.return_value = 0
@@ -171,7 +167,8 @@ class TestConnectionProbeNamesProfile:
         fake = _fake_connection_dialog(cfg, "New profile", monkeypatch)
         SettingsDialog._test_connection(fake)
 
-        fake._current_profile_label = "moonshot"  # user switched while testing
+        # user switched while testing
+        fake.provider_section.current_label.return_value = "moonshot"
         SettingsDialog._on_test_finished(fake, False, "HTTP 401: Unauthorized")
 
         assert fake.test_status.setText.call_args[0][0] == \

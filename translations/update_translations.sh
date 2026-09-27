@@ -12,6 +12,8 @@ SOURCES=(
     ../freecad_ai/i18n.py
     ../freecad_ai/ui/chat_widget.py
     ../freecad_ai/ui/settings_dialog.py
+    ../freecad_ai/ui/provider_section.py
+    ../freecad_ai/ui/prefs_page.py
     ../freecad_ai/ui/code_review_dialog.py
     ../freecad_ai/ui/message_view.py
 )

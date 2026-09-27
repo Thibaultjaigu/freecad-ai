@@ -74,10 +74,10 @@ Restart FreeCAD. The **FreeCAD AI** workbench will appear in the workbench selec
 
 There are two ways to configure FreeCAD AI:
 
-- **Edit → Preferences → FreeCAD AI** — provider, model, API key, max tokens, mode, thinking, and tool calling. Persists to FreeCAD's parameter store and mirrors into the workbench config on next load.
+- **Edit → Preferences → FreeCAD AI** — connection profiles (provider, model, API key, base URL), utility models, max tokens, mode, thinking, and tool calling. The profile and utility-model sections are the same widget as in the Settings dialog.
 - **Workbench Settings dialog** (gear icon in the chat panel) — everything above plus MCP servers, tool reranking, viewport capture, model parameters, hooks, system prompt overrides, and dock layout.
 
-Both UIs stay in sync. Configuration is stored at `<FreeCADAI dir>/config.json`.
+Both UIs edit the same file, `<FreeCADAI dir>/config.json`; FreeCAD's own parameter store (`user.cfg`) holds no FreeCAD AI settings.
 
 ### Configuration paths
 

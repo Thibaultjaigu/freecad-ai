@@ -24,6 +24,7 @@ except ImportError:
         pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
 
 from freecad_ai.config import AppConfig, ProviderConfig  # noqa: E402
+from freecad_ai.ui.provider_section import ProviderSection  # noqa: E402
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
 
 
@@ -64,36 +65,35 @@ class TestTheWarning:
     @staticmethod
     def _fake(**base_urls):
         # The real staticmethod, so these exercise the pair as it ships.
+        # The placeholder half is ProviderSection's, called directly (#99).
         return types.SimpleNamespace(
-            _profiles=_profiles(**base_urls),
-            _profiles_missing_base_url=SettingsDialog._profiles_missing_base_url,
-            _profiles_with_url_placeholder=(
-                SettingsDialog._profiles_with_url_placeholder))
+            profiles=_profiles(**base_urls),
+            _profiles_missing_base_url=SettingsDialog._profiles_missing_base_url)
 
     def test_no_warning_when_every_profile_is_complete(self):
         fake = self._fake(Work="https://api.openai.com/v1")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
-            assert SettingsDialog._confirm_incomplete_profiles(fake) is True
+            assert SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles) is True
         box.question.assert_not_called()
 
     def test_confirming_lets_the_save_proceed(self):
         fake = self._fake(Scratch="")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
             box.question.return_value = box.Yes
-            assert SettingsDialog._confirm_incomplete_profiles(fake) is True
+            assert SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles) is True
         assert box.question.called
 
     def test_declining_stops_the_save(self):
         fake = self._fake(Scratch="")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
             box.question.return_value = box.No
-            assert SettingsDialog._confirm_incomplete_profiles(fake) is False
+            assert SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles) is False
 
     def test_the_warning_names_the_offending_profiles(self):
         fake = self._fake(Scratch="", Spare="")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
             box.question.return_value = box.Yes
-            SettingsDialog._confirm_incomplete_profiles(fake)
+            SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles)
         text = " ".join(str(a) for a in box.question.call_args[0])
         assert "Scratch" in text and "Spare" in text
 
@@ -104,7 +104,7 @@ class TestSaveIsWiredToTheGuard:
 
     def _fake(self, allowed):
         return types.SimpleNamespace(
-            _commit_profile_fields=MagicMock(),
+            provider_section=MagicMock(),
             _confirm_incomplete_profiles=MagicMock(return_value=allowed),
             accept=MagicMock())
 
@@ -118,10 +118,11 @@ class TestSaveIsWiredToTheGuard:
                         return_value=cfg):
             SettingsDialog._save(fake)
         assert cfg.profiles == before
+        fake.provider_section.apply_to.assert_not_called()
         fake.accept.assert_not_called()
 
     def test_the_visible_edits_are_committed_before_the_guard_runs(self):
-        # The guard inspects _profiles, so an edit still sitting in the
+        # The guard inspects the profiles, so an edit still sitting in the
         # widgets has to land there first or a just-cleared Base URL slips
         # through unremarked.
         cfg = AppConfig()
@@ -129,7 +130,7 @@ class TestSaveIsWiredToTheGuard:
         with mock.patch("freecad_ai.ui.settings_dialog.get_config",
                         return_value=cfg):
             SettingsDialog._save(fake)
-        fake._commit_profile_fields.assert_called_once()
+        fake.provider_section.commit.assert_called_once()
 
 
 class TestFindsPlaceholderBaseUrls:
@@ -142,24 +143,24 @@ class TestFindsPlaceholderBaseUrls:
     """
 
     def test_unsubstituted_placeholder_is_reported_by_label(self):
-        found = SettingsDialog._profiles_with_url_placeholder(_profiles(
+        found = ProviderSection._profiles_with_url_placeholder(_profiles(
             Work="https://api.openai.com/v1",
             CF="https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1"))
         assert found == ["CF"]
 
     def test_a_substituted_url_reports_nothing(self):
-        found = SettingsDialog._profiles_with_url_placeholder(_profiles(
+        found = ProviderSection._profiles_with_url_placeholder(_profiles(
             CF="https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1"))
         assert found == []
 
     def test_blank_url_is_not_a_placeholder(self):
         # That case belongs to the other detector; reporting it twice would
         # name the same profile in two warnings.
-        assert SettingsDialog._profiles_with_url_placeholder(
+        assert ProviderSection._profiles_with_url_placeholder(
             _profiles(Scratch="")) == []
 
     def test_several_placeholder_profiles_are_all_named(self):
-        found = SettingsDialog._profiles_with_url_placeholder(
+        found = ProviderSection._profiles_with_url_placeholder(
             _profiles(Zeta="https://h/{ID}/v1", Alpha="https://h/{ID}/v1"))
         assert found == ["Alpha", "Zeta"]
 
@@ -168,7 +169,7 @@ class TestFindsPlaceholderBaseUrls:
         # URL, or the marker is renamed, this is where it surfaces.
         from freecad_ai.llm.providers import PROVIDERS
         preset = PROVIDERS["cloudflare-workers-ai"]["base_url"]
-        assert SettingsDialog._profiles_with_url_placeholder(
+        assert ProviderSection._profiles_with_url_placeholder(
             _profiles(CF=preset)) == ["CF"]
 
 
@@ -176,10 +177,8 @@ class TestThePlaceholderWarning:
     @staticmethod
     def _fake(**base_urls):
         return types.SimpleNamespace(
-            _profiles=_profiles(**base_urls),
-            _profiles_missing_base_url=SettingsDialog._profiles_missing_base_url,
-            _profiles_with_url_placeholder=(
-                SettingsDialog._profiles_with_url_placeholder))
+            profiles=_profiles(**base_urls),
+            _profiles_missing_base_url=SettingsDialog._profiles_missing_base_url)
 
     def test_a_placeholder_profile_is_warned_about(self):
         # The regression: before this guard the URL was non-blank, so the
@@ -187,7 +186,7 @@ class TestThePlaceholderWarning:
         fake = self._fake(CF="https://h/accounts/{ACCOUNT_ID}/ai/v1")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
             box.question.return_value = box.Yes
-            assert SettingsDialog._confirm_incomplete_profiles(fake) is True
+            assert SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles) is True
         text = " ".join(str(a) for a in box.question.call_args[0])
         assert "CF" in text and "ACCOUNT_ID" in text
 
@@ -195,13 +194,13 @@ class TestThePlaceholderWarning:
         fake = self._fake(CF="https://h/accounts/{ACCOUNT_ID}/ai/v1")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
             box.question.return_value = box.No
-            assert SettingsDialog._confirm_incomplete_profiles(fake) is False
+            assert SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles) is False
 
     def test_both_kinds_of_problem_are_named_in_one_warning(self):
         fake = self._fake(Scratch="", CF="https://h/accounts/{ACCOUNT_ID}/ai/v1")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
             box.question.return_value = box.Yes
-            SettingsDialog._confirm_incomplete_profiles(fake)
+            SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles)
         assert box.question.call_count == 1
         text = " ".join(str(a) for a in box.question.call_args[0])
         assert "Scratch" in text and "CF" in text
@@ -209,5 +208,5 @@ class TestThePlaceholderWarning:
     def test_complete_profiles_still_raise_nothing(self):
         fake = self._fake(Work="https://api.openai.com/v1")
         with mock.patch("freecad_ai.ui.settings_dialog.QMessageBox") as box:
-            assert SettingsDialog._confirm_incomplete_profiles(fake) is True
+            assert SettingsDialog._confirm_incomplete_profiles(fake, fake.profiles) is True
         box.question.assert_not_called()

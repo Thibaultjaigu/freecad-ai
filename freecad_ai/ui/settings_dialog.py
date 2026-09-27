@@ -11,13 +11,11 @@ Provides a GUI for configuring:
   - Test connection button
 """
 
-import copy
 import os
-import re
 import secrets
 
 from .compat import QtWidgets, QtCore, QtGui
-from ..i18n import translate, QT_TRANSLATE_NOOP
+from ..i18n import translate
 
 QDialog = QtWidgets.QDialog
 QWidget = QtWidgets.QWidget
@@ -43,10 +41,10 @@ QListWidget = QtWidgets.QListWidget
 QListWidgetItem = QtWidgets.QListWidgetItem
 QFileDialog = QtWidgets.QFileDialog
 QMessageBox = QtWidgets.QMessageBox
-QInputDialog = QtWidgets.QInputDialog
 
-from ..config import get_config, save_current_config, PROVIDER_PRESETS, ProviderConfig
-from ..llm.providers import get_provider_names
+from ..config import (get_config, notify_config_changed, save_current_config,
+                      PROVIDER_PRESETS)
+from .provider_section import ProviderSection
 
 # Thinking combo index -> config value. Shared by _save and _test_connection.
 _THINKING_VALUES = ["off", "on", "extended"]
@@ -209,49 +207,8 @@ class _TestRerankerThread(QThread):
             self.finished.emit(False, "{}: {}".format(type(e).__name__, e))
 
 
-# Markers a provider preset leaves for the user to fill in, e.g. the
-# {ACCOUNT_ID} in Cloudflare Workers AI's per-account endpoint. Deliberately
-# narrow: only a bare word in braces, so a real URL carrying braces for some
-# other reason is not mistaken for an unfinished one.
-_URL_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
-
-
 class SettingsDialog(QDialog):
     """Configuration dialog for FreeCAD AI."""
-
-    # Call sites that can run on their own profile. The identifier is the
-    # contract with create_client(cfg, utility); adding a new one here and
-    # at its call site is the whole opt-in.
-    # The labels are QT_TRANSLATE_NOOP-wrapped so pylupdate5 (which
-    # extracts string literals only) finds them here; the use site below
-    # runs them through translate() to resolve them at runtime.
-    UTILITIES = [
-        ("compaction",
-         QT_TRANSLATE_NOOP("SettingsDialog", "Context compaction")),
-        ("skill_eval",
-         QT_TRANSLATE_NOOP("SettingsDialog", "Skill evaluation")),
-        ("tool_optimize",
-         QT_TRANSLATE_NOOP("SettingsDialog", "Tool optimisation")),
-        ("rerank",
-         QT_TRANSLATE_NOOP("SettingsDialog", "Tool reranking")),
-    ]
-
-    @classmethod
-    def _collect_utility_profiles(cls, selections: dict) -> dict:
-        """Turn dropdown selections into the config mapping.
-
-        An empty selection means inherit the active profile and is stored
-        by omission, so config.json carries only real overrides.
-
-        A classmethod because it touches no widgets — that is what makes
-        it testable without constructing a dialog.
-        """
-        known = {u for u, _ in cls.UTILITIES}
-        return {
-            utility: label
-            for utility, label in selections.items()
-            if utility in known and label
-        }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -291,127 +248,15 @@ class SettingsDialog(QDialog):
         scroll.setWidget(scroll_widget)
         outer_layout.addWidget(scroll, 1)  # stretch factor 1 — takes available space
 
-        # Provider group
-        provider_group = QGroupBox(translate("SettingsDialog", "LLM Provider"))
-        provider_layout = QFormLayout()
-
-        # ── Profile selector ────────────────────────────────────────
-        profile_row = QHBoxLayout()
-        self.profile_combo = QComboBox()
-        self.profile_combo.setToolTip(translate(
-            "SettingsDialog",
-            "Named connection. Utilities below can each use a different one."))
-        profile_row.addWidget(self.profile_combo, 1)
-        self.profile_add_btn = QPushButton(translate("SettingsDialog", "New"))
-        self.profile_rename_btn = QPushButton(translate("SettingsDialog", "Rename"))
-        self.profile_delete_btn = QPushButton(translate("SettingsDialog", "Delete"))
-        for b in (self.profile_add_btn, self.profile_rename_btn,
-                  self.profile_delete_btn):
-            profile_row.addWidget(b)
-        provider_layout.addRow(translate("SettingsDialog", "Profile:"), profile_row)
-
-        # Selecting a profile in the combo means "edit this one". Chat runs
-        # on the profile this box is ticked for, and nothing else moves it.
-        self.profile_active_check = QCheckBox(translate(
-            "SettingsDialog", "Use this profile for chat"))
-        self.profile_active_check.setToolTip(translate(
-            "SettingsDialog",
-            "The ticked profile is the one the main chat runs on.\n"
-            "Utilities below inherit it unless they name their own.\n"
-            "To move it, tick a different profile — there is always\n"
-            "exactly one."))
-        self.profile_active_check.toggled.connect(
-            self._on_profile_active_toggled)
-        provider_layout.addRow("", self.profile_active_check)
-
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
-        self.profile_add_btn.clicked.connect(self._on_profile_add)
-        self.profile_rename_btn.clicked.connect(self._on_profile_rename)
-        self.profile_delete_btn.clicked.connect(self._on_profile_delete)
-
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItems([n.capitalize() for n in get_provider_names()])
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        provider_layout.addRow(translate("SettingsDialog", "Provider:"), self.provider_combo)
-
-        self.api_key_edit = QLineEdit()
-        self.api_key_edit.setEchoMode(QLineEdit.Password)
-        self.api_key_edit.setPlaceholderText(translate("SettingsDialog", "API key, file:/path/to/token, or cmd:command"))
-        self.api_key_edit.setToolTip(translate(
-            "SettingsDialog",
-            "For secure storage, prefix the value with:\n"
-            "  file:/path/to/keyfile  — read key from a file (re-read each call)\n"
-            "  cmd:some command        — run command, use stdout as the key\n"
-            "Example: cmd:secret-tool lookup service freecad-ai username anthropic"
-        ))
-        provider_layout.addRow(translate("SettingsDialog", "API Key:"), self.api_key_edit)
-
-        self.base_url_edit = QLineEdit()
-        self.base_url_edit.setPlaceholderText("https://api.example.com/v1")
-        provider_layout.addRow(translate("SettingsDialog", "Base URL:"), self.base_url_edit)
-
-        self.model_edit = QLineEdit()
-        self.model_edit.setPlaceholderText(translate("SettingsDialog", "Model name"))
-        self.model_edit.editingFinished.connect(self._on_model_changed)
+        # LLM Provider + Utility models: shared with Edit → Preferences
+        # (#99). The dialog-only parts ride on its signals.
+        self.provider_section = ProviderSection()
+        self.provider_section.profileShown.connect(self._on_profile_shown)
+        self.provider_section.aboutToCommit.connect(self._on_about_to_commit)
+        self.provider_section.presetApplied.connect(self._on_preset_applied)
+        self.provider_section.modelChanged.connect(self._on_model_changed)
+        layout.addWidget(self.provider_section)
         self._last_model_name = ""  # track model name for param save/load
-        provider_layout.addRow(translate("SettingsDialog", "Model:"), self.model_edit)
-
-        # Vision support. A profile field, not a global one: it describes
-        # this profile's model, and Test Connection probes whichever
-        # profile is on screen.
-        vision_layout = QHBoxLayout()
-        self.vision_check = QCheckBox(
-            translate("SettingsDialog", "Model supports vision")
-        )
-        self.vision_check.setToolTip(
-            translate("SettingsDialog",
-                      "When enabled, images are sent directly to the LLM.\n"
-                      "When disabled, images are described via MCP before sending.\n"
-                      "Use Test Connection to auto-detect.")
-        )
-        self.vision_check.stateChanged.connect(self._on_vision_override_changed)
-        vision_layout.addWidget(self.vision_check)
-
-        self._vision_status_label = QLabel()
-        self._vision_status_label.setStyleSheet("color: #888;")
-        vision_layout.addWidget(self._vision_status_label)
-
-        self._vision_reset_btn = QPushButton(translate("SettingsDialog", "Reset"))
-        self._vision_reset_btn.setMaximumWidth(50)
-        self._vision_reset_btn.setToolTip(
-            translate("SettingsDialog", "Clear manual override, use auto-detected value")
-        )
-        self._vision_reset_btn.clicked.connect(self._reset_vision_override)
-        self._vision_reset_btn.hide()
-        vision_layout.addWidget(self._vision_reset_btn)
-
-        vision_layout.addStretch()
-        provider_layout.addRow(translate("SettingsDialog", "Vision:"),
-                               vision_layout)
-
-        provider_group.setLayout(provider_layout)
-        layout.addWidget(provider_group)
-
-        # ── Utilities ───────────────────────────────────────────────
-        # Below the profile fields they refer to, so the reading order is
-        # "define connections, then say which one each job uses."
-        self.utility_group = QGroupBox(translate(
-            "SettingsDialog", "Utility models"))
-        util_form = QFormLayout()
-        self.utility_combos = {}
-        for utility, ulabel in self.UTILITIES:
-            combo = QComboBox()
-            combo.setToolTip(translate(
-                "SettingsDialog",
-                "Which profile this job runs on. Leave inherited to use "
-                "the active profile."))
-            combo.currentIndexChanged.connect(
-                lambda index, u=utility: self._on_utility_combo_changed(u, index))
-            self.utility_combos[utility] = combo
-            util_form.addRow(
-                translate("SettingsDialog", ulabel) + ":", combo)
-        self.utility_group.setLayout(util_form)
-        layout.addWidget(self.utility_group)
 
         # Model Parameters group — fixed fields + freeform key-value table
         model_params_group = QGroupBox(translate("SettingsDialog", "Model Parameters"))
@@ -1023,17 +868,9 @@ class SettingsDialog(QDialog):
         """Populate fields from the current config."""
         cfg = self._cfg = get_config()
 
-        # Profile edits stay dialog-local until OK. cfg is the live singleton,
-        # so mutating its profiles in place makes Cancel a no-op — and an
-        # unrelated save_current_config() (chat_widget's dock-layout change
-        # and Plan/Act toggle both call one) would flush a discarded edit to
-        # disk.
-        self._profiles = copy.deepcopy(cfg.profiles)
-        self._active_profile = cfg.active_profile
-        self._utility_profiles = dict(cfg.utility_profiles)
-
-        self._refresh_profile_combo()
-        self._show_profile(self._active_profile)
+        # Profile edits stay in the section's own copy until OK (see
+        # ProviderSection.load for why the live singleton must not see them).
+        self.provider_section.load(cfg)
 
         self.max_tokens_spin.setValue(cfg.max_tokens)
         self.context_window_spin.setValue(cfg.context_window)
@@ -1107,296 +944,37 @@ class SettingsDialog(QDialog):
 
     # ── Connection profiles ─────────────────────────────────────
 
-    def _rename_profile(self, old: str, new: str) -> None:
-        """Rename a profile, carrying every reference to it along.
+    def _on_profile_shown(self, prof):
+        """The section showed a profile: load its params into the table."""
+        self._load_model_params_table(prof.model, self._cfg, prof)
 
-        A profile's label is its identity — utility_profiles and
-        active_profile store the name, not a stable id — so a rename that
-        did not cascade would silently detach a utility from the
-        connection it was using.
+    def _on_about_to_commit(self, prof):
+        """The section is committing a profile: the table is its params.
+
+        A straight write-back, so a removed row is a removed parameter. Do
+        not reintroduce a merge with cfg.model_params here: that shared
+        layer is legacy and unread, and layering it back in would make
+        Remove a no-op again.
         """
-        new = (new or "").strip()
-        if not new:
-            raise ValueError("Profile name cannot be empty")
-        if old == new:
-            return
-        if new in self._profiles:
-            raise ValueError(f"A profile named {new!r} already exists")
-        if old not in self._profiles:
-            raise ValueError(f"No profile named {old!r}")
-        # Rebuild in place so the combo's order does not shuffle.
-        self._profiles = {
-            (new if label == old else label): prof
-            for label, prof in self._profiles.items()
-        }
-        if self._active_profile == old:
-            self._active_profile = new
-        for utility, label in list(self._utility_profiles.items()):
-            if label == old:
-                self._utility_profiles[utility] = new
-
-    def _delete_profile(self, label: str) -> None:
-        """Remove a profile, leaving nothing pointing at it."""
-        if label not in self._profiles:
-            raise ValueError(f"No profile named {label!r}")
-        if len(self._profiles) == 1:
-            raise ValueError("At least one profile is required")
-        del self._profiles[label]
-        if self._active_profile == label:
-            self._active_profile = next(iter(self._profiles))
-        for utility, mapped in list(self._utility_profiles.items()):
-            if mapped == label:
-                self._utility_profiles[utility] = ""
-
-    def _refresh_profile_combo(self) -> None:
-        """Repopulate the profile combo without firing its handler.
-
-        The active profile is marked in the item *text* only; the item
-        data stays the bare label, because _on_profile_changed and
-        findData both key off it.
-
-        The selection follows the profile being edited, not the active
-        one. Browsing no longer moves active, so re-selecting by
-        _active_profile here would yank the combo back to it after every
-        add, rename and delete. Falls back to the active profile, and
-        then to the first entry, for the delete path — where the label
-        being edited is the one that just went away.
-        """
-        self.profile_combo.blockSignals(True)
-        try:
-            self.profile_combo.clear()
-            for label in self._profiles:
-                text = (f"{label} (active)" if label == self._active_profile
-                        else label)
-                self.profile_combo.addItem(text, label)
-            for candidate in (getattr(self, "_current_profile_label", None),
-                              self._active_profile):
-                idx = self.profile_combo.findData(candidate) if candidate else -1
-                if idx >= 0:
-                    self.profile_combo.setCurrentIndex(idx)
-                    break
-            else:
-                self.profile_combo.setCurrentIndex(0)
-        finally:
-            self.profile_combo.blockSignals(False)
-        self._refresh_utility_combos()
-
-    def _refresh_utility_combos(self) -> None:
-        """Repopulate every utility dropdown from the working copy.
-
-        Reads self._profiles, not self._cfg.profiles: a profile added or
-        renamed in this dialog session must appear in these lists before
-        the user presses OK.
-        """
-        for utility, combo in self.utility_combos.items():
-            current = self._utility_profiles.get(utility, "")
-            combo.blockSignals(True)
-            try:
-                combo.clear()
-                combo.addItem(translate(
-                    "SettingsDialog", "(same as active profile)"), "")
-                for label in self._profiles:
-                    combo.addItem(label, label)
-                idx = combo.findData(current)
-                combo.setCurrentIndex(idx if idx >= 0 else 0)
-            finally:
-                combo.blockSignals(False)
-
-    def _on_utility_combo_changed(self, utility: str, index: int) -> None:
-        """Track a utility dropdown's live selection in the working copy.
-
-        Without this, _utility_profiles only reflects what was loaded when
-        the dialog opened, and both _refresh_utility_combos (on a rename or
-        delete elsewhere in the dialog) and the rerank probe would read
-        stale state instead of the user's in-progress choice.
-        """
-        combo = self.utility_combos[utility]
-        self._utility_profiles[utility] = combo.itemData(index) or ""
-
-    def _commit_profile_fields(self) -> None:
-        """Write the visible connection widgets back into their profile.
-
-        Called before switching away from a profile so an in-progress edit
-        is not lost — the #75 complaint, from the other direction.
-        """
-        label = getattr(self, "_current_profile_label", None)
-        prof = self._profiles.get(label)
-        if prof is None:
-            return
-        names = get_provider_names()
-        idx = self.provider_combo.currentIndex()
-        new_name = names[idx] if 0 <= idx < len(names) else prof.name
-        new_model = self.model_edit.text()
-        # A probe result describes one provider+model pair. Retype either
-        # and the stored answer is about something else, so drop it —
-        # per profile, since another profile's probe is still valid.
-        if new_name != prof.name or new_model != prof.model:
-            prof.vision_detected = None
-            prof.tools_detected = None
-            prof.thinking_detected = None
-        prof.name = new_name
-        prof.base_url = self.base_url_edit.text()
-        prof.api_key = self.api_key_edit.text()
-        prof.model = new_model
-        # The vision checkbox is a profile widget like the four above; the
-        # dialog holds its pending value so a tri-state (None) survives.
-        if hasattr(self, "_vision_override_value"):
-            prof.vision_override = self._vision_override_value
-        # The table is the profile's params in full (see
-        # _load_model_params_table), so this is a straight write-back and
-        # a removed row is a removed parameter. Do not reintroduce a
-        # merge with cfg.model_params here: that shared layer is legacy
-        # and unread, and layering it back in would make Remove a no-op
-        # again.
         prof.params = self._read_model_params_table()
 
-    def _show_profile(self, label: str) -> None:
-        """Populate the connection widgets from a profile."""
-        prof = self._profiles[label]
-        self._current_profile_label = label
-        names = get_provider_names()
-        try:
-            idx = names.index(prof.name)
-        except ValueError:
-            idx = 0
-        # Programmatic index moves must not run _on_provider_changed —
-        # that handler exists to apply a preset on a *user* switch, and
-        # firing it here would overwrite the profile's saved URL (#75).
-        self.provider_combo.blockSignals(True)
-        try:
-            self.provider_combo.setCurrentIndex(idx)
-        finally:
-            self.provider_combo.blockSignals(False)
-        self.api_key_edit.setText(prof.api_key)
-        self.base_url_edit.setText(prof.base_url)
-        self.model_edit.setText(prof.model)
-        self._load_model_params_table(prof.model, self._cfg, prof)
-        self._update_vision_ui(prof)
+    def _on_preset_applied(self, preset):
+        """A user provider switch: reload the table, maybe apply #10.
 
-        is_active = label == self._active_profile
-        # blockSignals, or populating the widgets would itself re-point
-        # chat through _on_profile_active_toggled.
-        self.profile_active_check.blockSignals(True)
-        try:
-            self.profile_active_check.setChecked(is_active)
-        finally:
-            self.profile_active_check.blockSignals(False)
-        # Disabled while ticked: there is always exactly one active
-        # profile, so the way to move it is to tick a different one, not
-        # to untick this one.
-        self.profile_active_check.setEnabled(not is_active)
-
-    def _on_profile_active_toggled(self, checked: bool) -> None:
-        """Point chat at the profile currently being edited.
-
-        Only the off->on transition is reachable — _show_profile disables
-        the box while it is ticked — so an untick is a no-op rather than
-        a way to end up with no active profile.
+        The working-copy profile, not the singleton: a vendor switch keeps
+        the parameters this profile already states, and falls back to the
+        new preset's default_params only when it states none.
         """
-        if not checked:
-            return
-        self._active_profile = self._current_profile_label
-        self.profile_active_check.setEnabled(False)
-        self._refresh_profile_combo()
-
-    def _on_profile_changed(self, index):
-        # Selects a profile for editing. It deliberately does NOT make it
-        # active: browsing the profiles to see what they hold must not
-        # silently re-point chat on OK.
-        label = self.profile_combo.itemData(index)
-        if not label or label == getattr(self, "_current_profile_label", None):
-            return
-        self._commit_profile_fields()
-        self._show_profile(label)
-
-    def _on_profile_add(self):
-        base = translate("SettingsDialog", "New profile")
-        label, n = base, 2
-        while label in self._profiles:
-            label, n = f"{base} {n}", n + 1
-        self._commit_profile_fields()
-        self._profiles[label] = ProviderConfig()
-        # Selected for editing, not made active. _show_profile first, so
-        # the refresh below finds _current_profile_label already pointing
-        # at the new profile and selects it.
-        self._show_profile(label)
-        self._refresh_profile_combo()
-
-    def _on_profile_rename(self):
-        old = self._current_profile_label
-        new, ok = QInputDialog.getText(
-            self, translate("SettingsDialog", "Rename profile"),
-            translate("SettingsDialog", "Name:"), QLineEdit.Normal, old)
-        if not ok:
-            return
-        try:
-            self._rename_profile(old, new)
-        except ValueError as e:
-            QMessageBox.warning(
-                self, translate("SettingsDialog", "Rename profile"), str(e))
-            return
-        self._current_profile_label = new.strip()
-        self._refresh_profile_combo()
-
-    def _on_profile_delete(self):
-        label = self._current_profile_label
-        if QMessageBox.question(
-                self, translate("SettingsDialog", "Delete profile"),
-                translate("SettingsDialog",
-                          "Delete profile '{}'?").format(label)) \
-                != QMessageBox.Yes:
-            return
-        try:
-            self._delete_profile(label)
-        except ValueError as e:
-            QMessageBox.warning(
-                self, translate("SettingsDialog", "Delete profile"), str(e))
-            return
-        self._refresh_profile_combo()
-        self._show_profile(self._active_profile)
-
-    def _on_provider_changed(self, index):
-        """Update base URL, model, and default params when provider changes."""
-        names = get_provider_names()
-        if 0 <= index < len(names):
-            name = names[index]
-            preset = PROVIDER_PRESETS.get(name, {})
-            # Only overwrite when the preset has a concrete value. The
-            # "custom" preset ships empty strings — wiping the user's
-            # gateway/model on every switch-to-custom is the second half
-            # of #12. Real providers always have non-empty presets, so
-            # behavior is unchanged there.
-            new_base_url = preset.get("base_url", "")
-            if new_base_url:
-                self.base_url_edit.setText(new_base_url)
-            new_model = preset.get("default_model", "")
-            if new_model:
-                self.model_edit.setText(new_model)
-
-            # Load saved params for the (possibly preserved) model. The
-            # working-copy profile, not the singleton: a vendor switch
-            # keeps the parameters this profile already states, and falls
-            # back to the new preset's default_params only when it states
-            # none.
-            prof = self._profiles.get(
-                getattr(self, "_current_profile_label", None))
-            self._load_model_params_table(
-                self.model_edit.text(), self._cfg, prof)
-
-            # Apply provider-recommended reranker settings only when the
-            # reranker UI is still at its factory default (off + top_n 15).
-            # This way an explicit user choice — even "off" — survives a
-            # provider switch (the rerank state in the dialog moves only
-            # when it currently looks untouched). Used by the github preset
-            # to enable keyword/top_n=8 by default; see issue #10.
-            rerank_defaults = preset.get("default_rerank", {})
-            if rerank_defaults and self._rerank_at_factory_defaults():
-                self._apply_rerank_defaults(rerank_defaults)
-
-            # A vendor switch is an explicit "point this profile
-            # elsewhere", so record it. Only a user-driven change reaches
-            # here: programmatic index moves are wrapped in blockSignals.
-            self._commit_profile_fields()
+        section = self.provider_section
+        self._load_model_params_table(
+            section.model_edit.text(), self._cfg, section.current_profile())
+        # Apply provider-recommended reranker settings only when the
+        # reranker UI is still at its factory default (off + top_n 15), so
+        # an explicit user choice — even "off" — survives a provider
+        # switch. Used by the github preset (issue #10).
+        rerank_defaults = preset.get("default_rerank", {})
+        if rerank_defaults and self._rerank_at_factory_defaults():
+            self._apply_rerank_defaults(rerank_defaults)
 
     def _rerank_at_factory_defaults(self) -> bool:
         """True if the rerank UI matches AppConfig's factory defaults."""
@@ -1446,20 +1024,17 @@ class SettingsDialog(QDialog):
             return None
         return state == QtCore.Qt.Checked
 
-    def _on_model_changed(self):
+    def _on_model_changed(self, new_model: str):
         """Stash the edited table on the working-copy profile, load the new model's."""
-        new_model = self.model_edit.text().strip()
         if new_model == self._last_model_name or not new_model:
             return
         # Stash current table on the working-copy profile (never the live
-        # singleton — see _commit_profile_fields for why cfg.model_params
-        # is read-only from this dialog).
-        prof = self._profiles.get(getattr(self, "_current_profile_label", None))
+        # singleton — cfg.model_params is read-only from this dialog).
+        prof = self.provider_section.current_profile()
         if self._last_model_name and prof is not None:
             params = self._read_model_params_table()
             if params:
                 prof.params = params
-        # Load params for new model
         self._load_model_params_table(new_model, self._cfg, prof)
 
     def _load_model_params_table(self, model_name: str, cfg=None, profile=None):
@@ -1474,16 +1049,13 @@ class SettingsDialog(QDialog):
         if cfg is None:
             cfg = get_config()
         if profile is None:
-            profile = self._profiles.get(
-                getattr(self, "_current_profile_label", None))
+            profile = self.provider_section.current_profile()
 
         params = dict(profile.params) if profile is not None else {}
 
         if not params:
             # No saved params — try provider defaults
-            names = get_provider_names()
-            idx = self.provider_combo.currentIndex()
-            provider_name = names[idx] if 0 <= idx < len(names) else ""
+            provider_name = self.provider_section.current_provider_name()
             preset = PROVIDER_PRESETS.get(provider_name, {})
             params = dict(preset.get("default_params", {}))
         if not params:
@@ -1545,9 +1117,7 @@ class SettingsDialog(QDialog):
 
     def _load_default_model_params(self):
         """Reset the params table to provider defaults."""
-        names = get_provider_names()
-        idx = self.provider_combo.currentIndex()
-        provider_name = names[idx] if 0 <= idx < len(names) else ""
+        provider_name = self.provider_section.current_provider_name()
         preset = PROVIDER_PRESETS.get(provider_name, {})
         params = dict(preset.get("default_params", {}))
         if not params:
@@ -1566,21 +1136,6 @@ class SettingsDialog(QDialog):
         self._last_default_prompt = default
 
     @staticmethod
-    def _profiles_with_url_placeholder(profiles) -> list:
-        """Sorted labels of profiles whose Base URL still holds a preset marker.
-
-        A few vendor endpoints are per-account, so their preset cannot ship a
-        complete URL and carries a ``{ACCOUNT_ID}``-style marker for the user
-        to replace. Nothing substitutes it: the literal braces travel in the
-        request path and come back as a 404 naming neither the field nor the
-        fix, so the unreplaced marker has to be caught here instead.
-        """
-        return sorted(
-            label for label, prof in profiles.items()
-            if _URL_PLACEHOLDER_RE.search(
-                getattr(prof, "base_url", "") or ""))
-
-    @staticmethod
     def _profiles_missing_base_url(profiles) -> list:
         """Sorted labels of profiles with no Base URL, which cannot work.
 
@@ -1594,7 +1149,7 @@ class SettingsDialog(QDialog):
             label for label, prof in profiles.items()
             if not (getattr(prof, "base_url", "") or "").strip())
 
-    def _confirm_incomplete_profiles(self) -> bool:
+    def _confirm_incomplete_profiles(self, profiles) -> bool:
         """Ask before saving a profile that cannot work. True to proceed.
 
         Covers both ways a Base URL is unusable — blank, or still carrying a
@@ -1606,12 +1161,12 @@ class SettingsDialog(QDialog):
         would strand every unrelated setting in this dialog.
         """
         problems = []
-        blank = self._profiles_missing_base_url(self._profiles)
+        blank = self._profiles_missing_base_url(profiles)
         if blank:
             problems.append(translate(
                 "SettingsDialog",
                 "No Base URL is set for: %s.") % ", ".join(blank))
-        unfilled = self._profiles_with_url_placeholder(self._profiles)
+        unfilled = ProviderSection._profiles_with_url_placeholder(profiles)
         if unfilled:
             problems.append(translate(
                 "SettingsDialog",
@@ -1635,31 +1190,27 @@ class SettingsDialog(QDialog):
         cfg = get_config()
 
         # Profile edits (add/rename/delete/field changes) have lived in the
-        # dialog-local working copy since _load_from_config. OK is the only
+        # section's working copy since _load_from_config. OK is the only
         # point where they land in the real config — commit the visible
         # widgets into the currently-shown profile first, then write the
         # whole working copy back. cfg.provider (a property resolving
         # profiles[active_profile]) then reads correctly for everything
         # below, with no separate provider.* writes needed.
-        self._commit_profile_fields()
-        if not self._confirm_incomplete_profiles():
+        section = self.provider_section
+        section.commit()
+        if not self._confirm_incomplete_profiles(section.profiles()):
             return
-        cfg.profiles = copy.deepcopy(self._profiles)
-        cfg.active_profile = self._active_profile
-        cfg.utility_profiles = self._collect_utility_profiles({
-            utility: combo.currentData()
-            for utility, combo in self.utility_combos.items()
-        })
+        section.apply_to(cfg)
 
         cfg.max_tokens = self.max_tokens_spin.value()
         cfg.context_window = self.context_window_spin.value()
         cfg.max_tool_turns = self.max_tool_turns_spin.value()
         cfg.execution_timeout = self.execution_timeout_spin.value()
 
-        # Model params reach the profile via _commit_profile_fields above
-        # (prof.params = the table, in full) — cfg.model_params is legacy
-        # and is neither read nor written from here.
-        model_name = self.model_edit.text().strip()
+        # Model params reach the profile via section.commit() above (its
+        # aboutToCommit slot sets prof.params = the table, in full) —
+        # cfg.model_params is legacy and is neither read nor written here.
+        model_name = section.model_edit.text().strip()
         if model_name:
             params = self._read_model_params_table()
             # Keep global temperature in sync for backward compat —
@@ -1717,6 +1268,10 @@ class SettingsDialog(QDialog):
 
         save_current_config()
 
+        # The chat panel (and anything else showing config-derived state)
+        # refreshes from this, whichever window saved (#99).
+        notify_config_changed()
+
         # The menu's "Keep Chat Panel Open" tick mirrors this flag, and
         # FreeCAD never re-asks the command for its state, so changing it here
         # would otherwise leave the checkmark stale until FreeCAD restarts.
@@ -1760,14 +1315,12 @@ class SettingsDialog(QDialog):
         """
         # An in-progress edit on the visible profile should be what gets
         # probed, not whatever was last committed.
-        self._commit_profile_fields()
-
-        # Read the dropdown's live selection, not self._utility_profiles —
-        # that mapping is only written back into it on Save.
-        label = self.utility_combos["rerank"].currentData() or ""
-        if label not in self._profiles:
-            label = self._active_profile
-        profile = self._profiles.get(label)
+        section = self.provider_section
+        section.commit()
+        label = section.utility_selection("rerank")
+        if label not in section.profiles():
+            label = section.active_label()
+        profile = section.profiles().get(label)
         # Captured now, so switching profiles mid-probe cannot relabel the
         # result that comes back.
         self._rerank_test_profile_label = label
@@ -1812,33 +1365,35 @@ class SettingsDialog(QDialog):
 
     def _test_connection(self):
         """Test the LLM connection in a background thread."""
-        # Resolve provider/URL/key/model/params from the visible widgets
-        # directly, rather than through cfg — the visible profile may not be
+        # Never through cfg: the visible profile may not be
         # cfg.active_profile (e.g. a profile added but not yet saved), and
         # writing it into the singleton would smuggle it into the wrong
         # profile. The Behavior-tab values below travel the same way, for
         # the second half of the same reason: nothing rolls a singleton
         # write back when the user hits Cancel (#76).
-        names = get_provider_names()
-        idx = self.provider_combo.currentIndex()
-        provider_name = names[idx] if 0 <= idx < len(names) else "anthropic"
-        base_url = self.base_url_edit.text()
-        # Match create_client()'s fallback: an explicit key on the widget
-        # wins, else the vendor-wide default in provider_keys. Without this
-        # a profile that deliberately leaves its own key blank to inherit
-        # the vendor default fails Test Connection even though real chat
-        # works fine.
-        api_key = self.api_key_edit.text() or \
+        # Commit first, then probe the committed profile: an edit in
+        # progress is what gets tested, and nothing outside the section's
+        # own copy is written (#76). Committing first also keeps the probe
+        # result: a commit *after* it would see the retyped model and
+        # drop the answer as stale.
+        section = self.provider_section
+        section.commit()
+        profile = section.current_profile()
+        provider_name = profile.name
+        base_url = profile.base_url
+        # Match create_client()'s fallback: an explicit key on the profile
+        # wins, else the vendor-wide default in provider_keys.
+        api_key = profile.api_key or \
             self._cfg.provider_keys.get(provider_name, "")
-        model = self.model_edit.text()
-        model_params = self._read_model_params_table()
+        model = profile.model
+        model_params = dict(profile.params)
 
         self.test_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
         # Captured now, so switching profiles mid-probe cannot relabel the
         # result that comes back.
-        self._test_profile_label = self._current_profile_label
+        self._test_profile_label = section.current_label()
         self.test_status.setText(
             self._probe_running_text(self._test_profile_label))
         self.test_status.setStyleSheet("color: #666;")
@@ -1873,32 +1428,20 @@ class SettingsDialog(QDialog):
                 label, translate("SettingsDialog", "Failed: ") + message))
             self.test_status.setStyleSheet("color: #c62828;")
 
-    def _probed_profile(self):
-        """The profile Test Connection actually probed, or None.
-
-        Captured at probe start (``_test_profile_label``) so a profile
-        switch while the probe is in flight cannot land the result on the
-        wrong profile.
-        """
-        label = getattr(self, "_test_profile_label", None)
-        return self._profiles.get(label)
-
     def _on_vision_probed(self, supports_vision: bool):
         """Handle vision probe result — records it on the probed profile.
 
         Test Connection probes whichever profile is on screen, which need
         not be the active one, so the answer belongs to that profile and
-        nowhere else. It lands in the dialog's working copy like every
-        other profile field and reaches the config on OK.
+        nowhere else. It lands in the ProviderSection's working copy like
+        every other profile field and reaches the config on OK.
         """
         self.test_btn.setEnabled(True)
         self.save_btn.setEnabled(True)
         self.cancel_btn.setEnabled(True)
-        profile = self._probed_profile()
-        if profile is not None:
-            profile.vision_detected = supports_vision
-            if self._test_profile_label == self._current_profile_label:
-                self._update_vision_ui(profile)
+        self.provider_section.set_probe_result(
+            getattr(self, "_test_profile_label", None),
+            vision=supports_vision)
         # Append vision status to test output
         current = self.test_status.text()
         if supports_vision:
@@ -1921,12 +1464,9 @@ class SettingsDialog(QDialog):
         emit only "vision" — tools/thinking stay None to keep falling back
         to the provider-wide static flag.
         """
-        profile = self._probed_profile()
-        if profile is not None:
-            if "tools" in caps:
-                profile.tools_detected = bool(caps["tools"])
-            if "thinking" in caps:
-                profile.thinking_detected = bool(caps["thinking"])
+        self.provider_section.set_probe_result(
+            getattr(self, "_test_profile_label", None),
+            **{k: bool(caps[k]) for k in ("tools", "thinking") if k in caps})
 
         # Build a single-line summary for the status label
         parts = []
@@ -2170,52 +1710,6 @@ class SettingsDialog(QDialog):
     def _reload_user_tools(self):
         """Re-scan and refresh the user tools list."""
         self._load_user_tools_list()
-
-    def _update_vision_ui(self, profile):
-        """Update vision checkbox and label from one profile's state."""
-        self._vision_override_value = profile.vision_override
-        # Temporarily disconnect to avoid triggering _on_vision_override_changed
-        self.vision_check.stateChanged.disconnect(self._on_vision_override_changed)
-        if profile.vision_override is not None:
-            self.vision_check.setChecked(profile.vision_override)
-            self._vision_status_label.setText(
-                translate("SettingsDialog", "(manual override)")
-            )
-            self._vision_reset_btn.show()
-        elif profile.vision_detected is not None:
-            self.vision_check.setChecked(profile.vision_detected)
-            self._vision_status_label.setText(
-                translate("SettingsDialog", "(auto-detected)")
-            )
-            self._vision_reset_btn.hide()
-        else:
-            self.vision_check.setChecked(False)
-            self._vision_status_label.setText(
-                translate("SettingsDialog", "(not tested)")
-            )
-            self._vision_reset_btn.hide()
-        self.vision_check.stateChanged.connect(self._on_vision_override_changed)
-
-    def _on_vision_override_changed(self, state):
-        """User toggled the vision checkbox — set manual override.
-
-        PySide2 QCheckBox.stateChanged emits int (0=Unchecked, 2=Checked).
-        """
-        self._vision_override_value = (state != 0)
-        self._vision_status_label.setText(
-            translate("SettingsDialog", "(manual override)")
-        )
-        self._vision_reset_btn.show()
-
-    def _reset_vision_override(self):
-        """Clear the manual override, revert to auto-detected value."""
-        profile = self._profiles.get(self._current_profile_label)
-        if profile is None:
-            return
-        profile.vision_override = None
-        self._update_vision_ui(profile)
-
-    # --- Hooks methods ---
 
     def _refresh_hooks_list(self):
         """Refresh the hooks list from the registry."""

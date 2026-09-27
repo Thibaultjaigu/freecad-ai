@@ -9,6 +9,7 @@ the worker implements an agentic loop: stream response, execute
 tool calls on the main thread, feed results back to the LLM.
 """
 
+import copy
 import json
 import logging
 import time
@@ -33,7 +34,9 @@ Slot = QtCore.Slot
 QFont = QtGui.QFont
 QTextCursor = QtGui.QTextCursor
 
-from ..config import LOGS_DIR, get_config, prune_oldest_files, save_current_config
+from ..config import (LOGS_DIR, add_config_listener, get_config,
+                      prune_oldest_files, remove_config_listener,
+                      save_current_config)
 from ..core.conversation import Conversation
 from ..core.executor import extract_code_blocks, extract_truncated_block, execute_code
 from ..core.loop_control import (
@@ -922,6 +925,7 @@ class ChatDockWidget(QDockWidget):
         except Exception:
             pass
         self._refresh_input_history()
+        self._register_config_listener()
 
     def _mark_shutdown(self):
         self._shutting_down = True
@@ -1755,21 +1759,47 @@ class ChatDockWidget(QDockWidget):
                 "Attach a file (image, text, or document)"))
 
     def _open_settings(self):
-        """Open the settings dialog."""
+        """Open the settings dialog.
+
+        Refreshing afterwards is _on_config_changed's job: the dialog
+        notifies on OK, and so does Edit → Preferences (#99).
+        """
         from .settings_dialog import SettingsDialog
-        cfg = get_config()
-        old_provider = cfg.provider.name
-        old_model = cfg.provider.model
-        old_mcp = list(cfg.mcp_servers)
         try:
             import FreeCADGui as Gui
             parent = Gui.getMainWindow()
         except ImportError:
             parent = self
-        dlg = SettingsDialog(parent)
-        dlg.exec()
-        # Refresh after settings may have changed
+        SettingsDialog(parent).exec()
+
+    @staticmethod
+    def _config_refresh_key(cfg):
+        """What _on_config_changed compares: provider, model, MCP servers.
+
+        A deep copy, so an MCP entry edited in place still reads as a
+        change on the next comparison.
+        """
+        return (cfg.provider.name, cfg.provider.model,
+                copy.deepcopy(cfg.mcp_servers))
+
+    def _register_config_listener(self):
+        """Listen for config saves until this panel is destroyed.
+
+        The listener list holds a bound method, and with it the panel; without
+        the removal a closed panel would stay alive there and raise on its
+        deleted Qt object at the next save. The lambda, not the bound method,
+        is what destroyed calls: by then the wrapper may be half gone.
+        """
+        self._config_seen = self._config_refresh_key(get_config())
+        listener = self._config_listener = self._on_config_changed
+        add_config_listener(listener)
+        self.destroyed.connect(lambda *_: remove_config_listener(listener))
+
+    def _on_config_changed(self):
+        """Refresh what depends on the provider, model and MCP servers."""
         cfg = get_config()
+        old_provider, old_model, old_mcp = self._config_seen
+        self._config_seen = self._config_refresh_key(cfg)
         if cfg.provider.name != old_provider or cfg.provider.model != old_model:
             self._vision_fallback_tool = None
         if cfg.mcp_servers != old_mcp:
