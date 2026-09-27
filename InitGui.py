@@ -351,16 +351,17 @@ try:
 except Exception:
     pass
 
-# Register the FreeCAD AI page in Edit → Preferences: a Python page class
-# embedding the Settings dialog's own provider sections, writing
-# config.json directly (#99).
+# Register the FreeCAD AI pages in Edit → Preferences: the same four pages
+# the Settings dialog shows, writing config.json directly (#99, #101).
 try:
-    from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage as _PrefsPage
-    Gui.addPreferencePage(_PrefsPage, "FreeCAD AI")
+    from freecad_ai.ui import prefs_page as _pp
+    for _cls in (_pp.FreeCADAIProviderPrefs, _pp.FreeCADAIBehaviorPrefs,
+                 _pp.FreeCADAIToolsPrefs, _pp.FreeCADAIMcpPrefs):
+        Gui.addPreferencePage(_cls, "FreeCAD AI")
 except Exception as _e:
     import FreeCAD as _App
     _App.Console.PrintWarning(
-        f"FreeCAD AI: preferences page not registered: {_e}\n")
+        f"FreeCAD AI: preferences pages not registered: {_e}\n")
 
 Gui.addCommand("FreeCADAI_OpenChat", OpenChatCommand())
 Gui.addCommand("FreeCADAI_OpenSettings", OpenSettingsCommand())

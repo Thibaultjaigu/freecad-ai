@@ -59,50 +59,59 @@ def _select(dlg, label):
 
 
 def test_showing_a_profile_loads_its_params(dialog):
-    assert dialog._read_model_params_table() == {"temperature": 0.1}
+    assert dialog.provider_page._read_model_params_table() == {"temperature": 0.1}
     _select(dialog, "b")
-    assert dialog._read_model_params_table() == {"top_k": 40}
+    assert dialog.provider_page._read_model_params_table() == {"top_k": 40}
 
 
 def test_switching_away_commits_the_table_into_the_profile(dialog):
-    dialog._populate_model_params_table({"temperature": 0.7})
+    dialog.provider_page._populate_model_params_table({"temperature": 0.7})
     _select(dialog, "b")
     assert dialog.provider_section.profiles()["a"].params == {
         "temperature": 0.7}
 
 
 def test_a_b_a_keeps_each_profiles_own_params(dialog):
-    dialog._populate_model_params_table({"temperature": 0.7})
+    dialog.provider_page._populate_model_params_table({"temperature": 0.7})
     _select(dialog, "b")
     _select(dialog, "a")
-    assert dialog._read_model_params_table() == {"temperature": 0.7}
+    assert dialog.provider_page._read_model_params_table() == {"temperature": 0.7}
 
 
-def test_a_provider_switch_applies_default_rerank_when_untouched(dialog):
+def test_a_provider_switch_applies_default_rerank_on_save(dialog, cfg, monkeypatch):
+    """#10 at save time: the widgets don't flip before OK any more (Decision
+    3's accepted cost) — only get_config() after a real save shows it."""
+    import freecad_ai.ui.settings_dialog as sd
+    import freecad_ai.ui.command_state as command_state
     defaults = PROVIDER_PRESETS["github"]["default_rerank"]
     dialog.provider_section.provider_combo.setCurrentIndex(
         get_provider_names().index("github"))
-    assert dialog.rerank_method_combo.currentIndex() == \
-        SettingsDialog._RERANK_METHOD_INDEX[defaults["method"]]
-    assert dialog.rerank_top_n_spin.value() == int(defaults["top_n"])
+    monkeypatch.setattr(sd, "save_current_config", lambda: None)
+    monkeypatch.setattr(sd, "notify_config_changed", lambda: None)
+    monkeypatch.setattr(command_state, "set_command_checked",
+                        lambda *a, **k: None)
+    dialog._save()
+    from freecad_ai.config import get_config
+    assert get_config().rerank_method == defaults["method"]
+    assert get_config().rerank_top_n == defaults["top_n"]
 
 
 def test_a_model_edit_swaps_the_table(dialog):
     s = dialog.provider_section
     s.model_edit.setText("other-model")
     s.model_edit.editingFinished.emit()
-    assert dialog._last_model_name == "other-model"
+    assert dialog.provider_page._last_model_name == "other-model"
 
 
 def test_ok_writes_profiles_and_the_table(dialog, cfg):
-    dialog._populate_model_params_table({"temperature": 0.2})
+    dialog.provider_page._populate_model_params_table({"temperature": 0.2})
     dialog._save()
     assert cfg.profiles["a"].params == {"temperature": 0.2}
     assert cfg.active_profile == "a"
 
 
 def test_test_connection_probes_the_shown_profile(dialog, monkeypatch):
-    import freecad_ai.ui.settings_dialog as sd
+    import freecad_ai.ui.settings_pages.provider_page as pp
     captured = {}
 
     class _Thread:
@@ -114,15 +123,15 @@ def test_test_connection_probes_the_shown_profile(dialog, monkeypatch):
         def start(self):
             pass
 
-    monkeypatch.setattr(sd, "_TestConnectionThread", _Thread)
+    monkeypatch.setattr(pp, "_TestConnectionThread", _Thread)
     _select(dialog, "b")
     dialog.provider_section.model_edit.setText("typed-model")
-    dialog._test_connection()
+    dialog.provider_page._test_connection()
     provider_name, base_url, _key, model, params = captured["args"][:5]
     assert (provider_name, model) == ("ollama", "typed-model")
     assert base_url == "http://localhost:11434/v1"
     assert params == {"top_k": 40}
-    assert dialog._test_profile_label == "b"
+    assert dialog.provider_page._test_profile_label == "b"
 
 
 def test_edit_survives_save_and_resolve_params(dialog, cfg):
@@ -131,6 +140,39 @@ def test_edit_survives_save_and_resolve_params(dialog, cfg):
     what runtime resolves after OK, not the legacy copy."""
     from freecad_ai.llm.client import resolve_params
     cfg.model_params = {"m-a": {"temperature": 1}}
-    dialog._populate_model_params_table({"temperature": 0.2})
+    dialog.provider_page._populate_model_params_table({"temperature": 0.2})
     dialog._save()
     assert resolve_params(cfg, cfg.provider)["temperature"] == 0.2
+
+
+def test_on_close_requested_save_calls_save(dialog, monkeypatch):
+    """ToolsPage's editor prompt (#101): Save means the dialog's own OK path."""
+    calls = []
+    monkeypatch.setattr(dialog, "_save", lambda: calls.append("save"))
+    monkeypatch.setattr(dialog, "reject", lambda: calls.append("reject"))
+    dialog._on_close_requested(True)
+    assert calls == ["save"]
+
+
+def test_on_close_requested_discard_calls_reject(dialog, monkeypatch):
+    """...and Discard means Cancel, not a bespoke third outcome."""
+    calls = []
+    monkeypatch.setattr(dialog, "_save", lambda: calls.append("save"))
+    monkeypatch.setattr(dialog, "reject", lambda: calls.append("reject"))
+    dialog._on_close_requested(False)
+    assert calls == ["reject"]
+
+
+def test_tools_page_close_request_is_wired_to_the_dialog(dialog, monkeypatch):
+    """A fake self can't show a signal is connected -- emit it on the real
+    tools_page and confirm the dialog's own slot is what runs."""
+    calls = []
+    monkeypatch.setattr(dialog, "_save", lambda: calls.append("save"))
+    monkeypatch.setattr(dialog, "reject", lambda: calls.append("reject"))
+
+    dialog.tools_page.closeHostRequested.emit(True)
+    assert calls == ["save"]
+
+    calls.clear()
+    dialog.tools_page.closeHostRequested.emit(False)
+    assert calls == ["reject"]

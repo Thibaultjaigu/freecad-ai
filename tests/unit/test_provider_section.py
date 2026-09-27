@@ -210,6 +210,53 @@ class TestUnknownProvider:
         section.apply_to(out)
         assert out.profiles["cloud"].name == "ollama"
 
+    def test_the_stored_name_is_shown_not_the_first_provider(self, section):
+        section.load(self._cfg())
+        combo = section.provider_combo
+        assert combo.currentIndex() == combo.count() - 1
+        assert combo.currentText() == "futurevendor (unknown provider)"
+        assert combo.currentData() == "futurevendor"
+        assert combo.count() == len(get_provider_names()) + 1
+
+    def test_a_known_profile_removes_the_temporary_item(self, section):
+        section.load(self._cfg())
+        section.profile_combo.setCurrentIndex(
+            section.profile_combo.findData("local"))
+        assert section.provider_combo.count() == len(get_provider_names())
+        assert section.provider_combo.currentText() != ""
+        assert section.current_provider_name() == "ollama"
+
+    def test_switching_back_and_forth_never_duplicates_it(self, section):
+        section.load(self._cfg())
+        for label in ("local", "cloud", "local", "cloud"):
+            section.profile_combo.setCurrentIndex(
+                section.profile_combo.findData(label))
+        assert section.provider_combo.count() == len(get_provider_names()) + 1
+        texts = [section.provider_combo.itemText(i)
+                 for i in range(section.provider_combo.count())]
+        assert texts.count("futurevendor (unknown provider)") == 1
+
+    def test_picking_the_first_provider_really_switches(self, section):
+        """The old stand-in *was* index 0, so picking Anthropic was a no-op."""
+        section.load(self._cfg())
+        first = get_provider_names()[0]
+        section.provider_combo.setCurrentIndex(0)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].name == first
+        assert section.provider_combo.count() == len(get_provider_names())
+
+    def test_the_real_pick_applies_the_preset(self, section):
+        section.load(self._cfg())
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("ollama"))
+        assert section.base_url_edit.text() == \
+            PROVIDER_PRESETS["ollama"]["base_url"]
+
+    def test_current_provider_name_is_empty_while_unknown(self, section):
+        section.load(self._cfg())
+        assert section.current_provider_name() == ""
+
 
 class TestProbeResult:
     def test_it_lands_on_the_named_profile(self, section):
@@ -297,3 +344,95 @@ class TestSignals:
         section.model_edit.setText("  other-model ")
         section.model_edit.editingFinished.emit()
         assert seen == [("other-model",)]
+
+
+class TestRerankDefaults:
+    """#10 at save time: a switch to a preset with default_rerank sets the
+    reranker only while the live config is still at factory defaults."""
+
+    GH = PROVIDER_PRESETS["github"]["default_rerank"]
+
+    def _switch_to_github(self, section):
+        section.load(_cfg())
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("github"))
+
+    def test_untouched_reranker_takes_the_preset(self, section):
+        self._switch_to_github(section)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.rerank_method == self.GH["method"]
+        assert out.rerank_top_n == self.GH["top_n"]
+
+    def test_an_explicit_choice_survives(self, section):
+        self._switch_to_github(section)
+        out = AppConfig()
+        out.rerank_method = "llm"
+        section.apply_to(out)
+        assert out.rerank_method == "llm"
+        assert out.rerank_top_n == 15
+
+    def test_a_changed_top_n_alone_counts_as_explicit(self, section):
+        self._switch_to_github(section)
+        out = AppConfig()
+        out.rerank_top_n = 20
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 20)
+
+    def test_no_switch_no_change(self, section):
+        section.load(_cfg())
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_last_switch_wins(self, section):
+        self._switch_to_github(section)
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("ollama"))
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_load_clears_the_record(self, section):
+        self._switch_to_github(section)
+        section.load(_cfg())
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def _switch_local_to_github(self, section):
+        section.load(_cfg(), label="local")        # a non-active profile
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("github"))
+        assert section._pending_rerank == self.GH
+
+    def test_deleting_the_switched_profile_drops_the_record(
+            self, section, monkeypatch):
+        self._switch_local_to_github(section)
+        monkeypatch.setattr(ps_mod.QMessageBox, "question",
+                            lambda *a, **k: ps_mod.QMessageBox.Yes)
+        section._on_profile_delete()
+        assert "local" not in section.profiles()
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_renaming_the_switched_profile_keeps_the_record(
+            self, section, monkeypatch):
+        self._switch_local_to_github(section)
+        monkeypatch.setattr(ps_mod.QInputDialog, "getText",
+                            lambda *a, **k: ("gh", True))
+        section._on_profile_rename()
+        assert "gh" in section.profiles()
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == (
+            self.GH["method"], self.GH["top_n"])
+
+    def test_apply_consumes_the_record(self, section):
+        """A second Apply after the user set 'off' again must not re-apply."""
+        self._switch_to_github(section)
+        section.apply_to(AppConfig())
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)

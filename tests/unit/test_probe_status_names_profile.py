@@ -13,6 +13,8 @@ nor displayed.
 
 The label is captured when the probe *starts*, so switching profiles
 while a probe is in flight cannot mislabel the result that comes back.
+
+Both probes live on ``ProviderPage`` since #101.
 """
 
 from unittest import mock
@@ -28,7 +30,7 @@ except ImportError:
         pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
 
 from freecad_ai.config import AppConfig, ProviderConfig  # noqa: E402
-from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.provider_page import ProviderPage  # noqa: E402
 
 
 def _cfg():
@@ -49,20 +51,22 @@ def _cfg():
 def _bind_helpers(fake):
     """The status formatters are the code under test — the fake self must
     carry the real ones, not MagicMock stand-ins."""
-    fake._probe_running_text = SettingsDialog._probe_running_text
-    fake._probe_result_text = SettingsDialog._probe_result_text
+    fake._probe_running_text = ProviderPage._probe_running_text
+    fake._probe_result_text = ProviderPage._probe_result_text
 
 
 def _fake_rerank_dialog(cfg, selection, monkeypatch):
     """A fake self carrying only what _test_reranker touches."""
     monkeypatch.setattr(
-        "freecad_ai.ui.settings_dialog._TestRerankerThread",
+        "freecad_ai.ui.settings_pages.provider_page._TestRerankerThread",
         lambda *a, **kw: mock.MagicMock())
+    monkeypatch.setattr(
+        "freecad_ai.ui.settings_pages.provider_page.get_config", lambda: cfg)
     fake = mock.MagicMock()
     fake._cfg = cfg
-    fake.provider_section.profiles.return_value = cfg.profiles
-    fake.provider_section.active_label.return_value = cfg.active_profile
-    fake.provider_section.utility_selection.return_value = selection
+    fake.section.profiles.return_value = cfg.profiles
+    fake.section.active_label.return_value = cfg.active_profile
+    fake.section.utility_selection.return_value = selection
     _bind_helpers(fake)
     return fake
 
@@ -70,17 +74,16 @@ def _fake_rerank_dialog(cfg, selection, monkeypatch):
 def _fake_connection_dialog(cfg, displayed, monkeypatch):
     """A fake self carrying only what _test_connection touches."""
     monkeypatch.setattr(
-        "freecad_ai.ui.settings_dialog._TestConnectionThread",
+        "freecad_ai.ui.settings_pages.provider_page._TestConnectionThread",
         lambda *a, **kw: mock.MagicMock())
+    monkeypatch.setattr(
+        "freecad_ai.ui.settings_pages.provider_page.get_config", lambda: cfg)
     fake = mock.MagicMock()
     fake._cfg = cfg
-    fake.provider_section.current_label.return_value = displayed
-    fake.provider_section.current_profile.return_value = ProviderConfig(
+    fake.section.current_label.return_value = displayed
+    fake.section.current_profile.return_value = ProviderConfig(
         name="anthropic", base_url="https://api.anthropic.com", api_key="",
         model="claude-sonnet-4-6")
-    # _test_connection indexes _THINKING_VALUES with this, so a MagicMock
-    # index would be a TypeError rather than a probe.
-    fake.thinking_combo.currentIndex.return_value = 0
     _bind_helpers(fake)
     return fake
 
@@ -91,7 +94,7 @@ class TestRerankerProbeNamesProfile:
         cfg = _cfg()
         fake = _fake_rerank_dialog(cfg, "rerank-ollama", monkeypatch)
 
-        SettingsDialog._test_reranker(fake)
+        ProviderPage._test_reranker(fake)
 
         assert fake._rerank_test_status.setText.call_args[0][0] == \
             'Testing "rerank-ollama"...'
@@ -101,7 +104,7 @@ class TestRerankerProbeNamesProfile:
         cfg = _cfg()
         fake = _fake_rerank_dialog(cfg, "", monkeypatch)
 
-        SettingsDialog._test_reranker(fake)
+        ProviderPage._test_reranker(fake)
 
         assert fake._rerank_test_status.setText.call_args[0][0] == \
             'Testing "moonshot"...'
@@ -110,9 +113,9 @@ class TestRerankerProbeNamesProfile:
             self, monkeypatch):
         cfg = _cfg()
         fake = _fake_rerank_dialog(cfg, "rerank-ollama", monkeypatch)
-        SettingsDialog._test_reranker(fake)
+        ProviderPage._test_reranker(fake)
 
-        SettingsDialog._on_rerank_test_finished(fake, True, "Picked: a, b")
+        ProviderPage._on_rerank_test_finished(fake, True, "Picked: a, b")
 
         assert fake._rerank_test_status.setText.call_args[0][0] == \
             '"rerank-ollama": OK — Picked: a, b'
@@ -121,9 +124,9 @@ class TestRerankerProbeNamesProfile:
             self, monkeypatch):
         cfg = _cfg()
         fake = _fake_rerank_dialog(cfg, "rerank-ollama", monkeypatch)
-        SettingsDialog._test_reranker(fake)
+        ProviderPage._test_reranker(fake)
 
-        SettingsDialog._on_rerank_test_finished(fake, False, "call failed")
+        ProviderPage._on_rerank_test_finished(fake, False, "call failed")
 
         assert fake._rerank_test_status.setText.call_args[0][0] == \
             '"rerank-ollama": Error: call failed'
@@ -135,7 +138,7 @@ class TestConnectionProbeNamesProfile:
         cfg = _cfg()
         fake = _fake_connection_dialog(cfg, "New profile", monkeypatch)
 
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
         assert fake.test_status.setText.call_args[0][0] == \
             'Testing "New profile"...'
@@ -144,9 +147,9 @@ class TestConnectionProbeNamesProfile:
         """The #401-on-a-new-profile case from the GUI pass."""
         cfg = _cfg()
         fake = _fake_connection_dialog(cfg, "New profile", monkeypatch)
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
-        SettingsDialog._on_test_finished(fake, False, "HTTP 401: Unauthorized")
+        ProviderPage._on_test_finished(fake, False, "HTTP 401: Unauthorized")
 
         assert fake.test_status.setText.call_args[0][0] == \
             '"New profile": Failed: HTTP 401: Unauthorized'
@@ -154,9 +157,9 @@ class TestConnectionProbeNamesProfile:
     def test_success_names_the_displayed_profile(self, monkeypatch):
         cfg = _cfg()
         fake = _fake_connection_dialog(cfg, "moonshot", monkeypatch)
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
-        SettingsDialog._on_test_finished(fake, True, "Connected! Response: hello")
+        ProviderPage._on_test_finished(fake, True, "Connected! Response: hello")
 
         assert fake.test_status.setText.call_args[0][0] == \
             '"moonshot": Connected! Response: hello'
@@ -165,11 +168,11 @@ class TestConnectionProbeNamesProfile:
         """Switching profiles mid-probe must not relabel the result."""
         cfg = _cfg()
         fake = _fake_connection_dialog(cfg, "New profile", monkeypatch)
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
         # user switched while testing
-        fake.provider_section.current_label.return_value = "moonshot"
-        SettingsDialog._on_test_finished(fake, False, "HTTP 401: Unauthorized")
+        fake.section.current_label.return_value = "moonshot"
+        ProviderPage._on_test_finished(fake, False, "HTTP 401: Unauthorized")
 
         assert fake.test_status.setText.call_args[0][0] == \
             '"New profile": Failed: HTTP 401: Unauthorized'
@@ -182,15 +185,15 @@ class TestUnnamedProfileDegradesToPlainText:
         cfg = _cfg()
         fake = _fake_connection_dialog(cfg, "", monkeypatch)
 
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
         assert fake.test_status.setText.call_args[0][0] == "Testing..."
 
     def test_result_without_a_label(self, monkeypatch):
         cfg = _cfg()
         fake = _fake_connection_dialog(cfg, "", monkeypatch)
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
-        SettingsDialog._on_test_finished(fake, False, "boom")
+        ProviderPage._on_test_finished(fake, False, "boom")
 
         assert fake.test_status.setText.call_args[0][0] == "Failed: boom"

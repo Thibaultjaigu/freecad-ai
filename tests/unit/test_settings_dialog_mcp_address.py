@@ -1,6 +1,6 @@
-"""Tests for the MCP server address fields in the Settings dialog.
+"""Tests for the MCP server address fields in McpPage.
 
-Only the pure parsing helper is tested. Building the dialog needs a
+Only the pure parsing helper is tested. Building the page needs a
 QApplication; extracting the normalisation into a staticmethod keeps the part
 with actual logic testable without one.
 """
@@ -16,9 +16,9 @@ except ImportError:
         pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
 
 from freecad_ai.mcp.gui_server import DEFAULT_HOST, DEFAULT_PORT  # noqa: E402
-from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.mcp_page import McpPage  # noqa: E402
 
-parse = SettingsDialog._parse_server_address
+parse = McpPage._parse_server_address
 
 
 def test_parses_a_normal_address():
@@ -62,7 +62,7 @@ def test_privileged_ports_are_allowed():
 # (resolve_allowed_hosts) refuses a "*" loudly instead, because there is no
 # dialog there and a traceback is the only feedback available.
 
-parse_hosts = SettingsDialog._parse_allowed_hosts
+parse_hosts = McpPage._parse_allowed_hosts
 
 
 def test_allowed_hosts_empty_field_means_the_transport_default():

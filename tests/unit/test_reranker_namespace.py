@@ -34,7 +34,7 @@ except ImportError:
 from freecad_ai.config import AppConfig, ProviderConfig  # noqa: E402
 from freecad_ai.llm.client import create_client  # noqa: E402
 from freecad_ai.ui.chat_widget import _run_reranker  # noqa: E402
-from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.provider_page import ProviderPage  # noqa: E402
 
 
 def _cfg_with_params():
@@ -154,17 +154,20 @@ class TestTestRerankerProbeMatchesCreateClient:
                 pass
 
         monkeypatch.setattr(
-            "freecad_ai.ui.settings_dialog._TestRerankerThread",
+            "freecad_ai.ui.settings_pages.provider_page._TestRerankerThread",
             _CapturingThread)
+        monkeypatch.setattr(
+            "freecad_ai.ui.settings_pages.provider_page.get_config",
+            lambda: cfg)
 
         fake = mock.MagicMock()
         fake._cfg = cfg
-        fake.provider_section.profiles.return_value = cfg.profiles
-        fake.provider_section.active_label.return_value = cfg.active_profile
-        fake.provider_section.utility_selection.return_value = \
+        fake.section.profiles.return_value = cfg.profiles
+        fake.section.active_label.return_value = cfg.active_profile
+        fake.section.utility_selection.return_value = \
             rerank_selection
 
-        SettingsDialog._test_reranker(fake)
+        ProviderPage._test_reranker(fake)
         return captured
 
     def test_override_matches_resolve_profile_and_resolve_params(

@@ -31,6 +31,7 @@ from freecad_ai.config import (  # noqa: E402
 from freecad_ai.llm.providers import get_provider_names  # noqa: E402
 from freecad_ai.ui.provider_section import ProviderSection  # noqa: E402
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.provider_page import ProviderPage  # noqa: E402
 
 
 class _FakeSelf:
@@ -54,6 +55,7 @@ class _FakeSelf:
         self._profiles = cfg.profiles
         self._active_profile = cfg.active_profile
         self._utility_profiles = cfg.utility_profiles
+        self._pending_rerank_label = None   # no #10 switch recorded
 
 
 def _cfg():
@@ -189,6 +191,7 @@ class _Combo:
     def __init__(self, index=0):
         self._i = index
         self.calls = []
+        self.items = []          # [(text, data)] for count() and removeItem()
 
     def currentIndex(self):
         return self._i
@@ -199,6 +202,16 @@ class _Combo:
 
     def blockSignals(self, b):
         self.calls.append(("block", b))
+
+    def count(self):
+        return len(self.items)
+
+    def addItem(self, text, data=None):
+        self.items.append((text, data))
+
+    def removeItem(self, index):
+        if 0 <= index < len(self.items):
+            self.items.pop(index)
 
 
 class _Check:
@@ -297,6 +310,8 @@ class TestProfileFieldRoundTrip:
             presetApplied=_Sig(),
         )
         fake._update_vision_ui = lambda profile: None
+        fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
+        fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
         return fake
 
     def test_edited_base_url_survives_switching_away_and_back(self):
@@ -390,23 +405,12 @@ class TestCancelDiscardsProfileEdits:
 
 
 def _fake_save_dialog():
-    """MagicMock fake for SettingsDialog._save. _save touches a lot of
-    unrelated widgets that only need to not raise; the profiles are the
-    section's business (TestRoundTrip in test_provider_section.py)."""
+    """MagicMock fake for SettingsDialog._save. _save now only orchestrates
+    the four pages, each MagicMocked here and covered by its own tests
+    (TestRoundTrip in test_provider_section.py, and each page's own test
+    module); this fake only needs to not raise."""
     fake = MagicMock()
-    fake._read_model_params_table = lambda: {}
-    fake._read_strip_thinking_state = lambda: None
-    fake._get_default_prompt_text = lambda: ""
-    fake._parse_server_address = lambda host, port: ("127.0.0.1", 8765)
-    fake._parse_allowed_hosts = lambda text: []
     fake.accept = lambda: None
-    fake.provider_section.model_edit.text.return_value = "some-model"
-    fake.thinking_combo.currentIndex.return_value = 0
-    fake.viewport_capture_combo.currentIndex.return_value = 0
-    fake.viewport_resolution_combo.currentIndex.return_value = 0
-    fake.rerank_method_combo.currentIndex.return_value = 0
-    fake.system_prompt_edit.toPlainText.return_value = ""
-    fake.rerank_pinned_edit.text.return_value = ""
     return fake
 
 
@@ -423,10 +427,10 @@ class TestSaveHandsTheProfilesToTheSection:
         fake = _fake_save_dialog()
         fake._confirm_incomplete_profiles.return_value = True
         SettingsDialog._save(fake)
-        fake.provider_section.commit.assert_called_once_with()
+        fake.provider_page.section.commit.assert_called_once_with()
         fake._confirm_incomplete_profiles.assert_called_once_with(
-            fake.provider_section.profiles.return_value)
-        fake.provider_section.apply_to.assert_called_once_with(cfg)
+            fake.provider_page.section.profiles.return_value)
+        fake.provider_page.apply_to.assert_called_once_with(cfg)
 
     def test_commit_happens_before_the_confirmation_and_the_write(
             self, monkeypatch):
@@ -437,11 +441,11 @@ class TestSaveHandsTheProfilesToTheSection:
             "freecad_ai.ui.settings_dialog.save_current_config", lambda: None)
         fake = _fake_save_dialog()
         order = []
-        fake.provider_section.commit.side_effect = (
+        fake.provider_page.section.commit.side_effect = (
             lambda: order.append("commit"))
         fake._confirm_incomplete_profiles.side_effect = (
             lambda profiles: order.append("confirm") or True)
-        fake.provider_section.apply_to.side_effect = (
+        fake.provider_page.apply_to.side_effect = (
             lambda c: order.append("apply"))
         SettingsDialog._save(fake)
         assert order == ["commit", "confirm", "apply"]
@@ -453,7 +457,7 @@ class TestSaveHandsTheProfilesToTheSection:
         fake = _fake_save_dialog()
         fake._confirm_incomplete_profiles.return_value = False
         SettingsDialog._save(fake)
-        fake.provider_section.apply_to.assert_not_called()
+        fake.provider_page.apply_to.assert_not_called()
 
 
 class TestLoadHandsTheConfigToTheSection:
@@ -465,12 +469,13 @@ class TestLoadHandsTheConfigToTheSection:
     def test_load_from_config_loads_the_section(self, monkeypatch):
         cfg = _cfg()
         fake = MagicMock()
+        fake._pages = lambda: SettingsDialog._pages(fake)
         monkeypatch.setattr(
             "freecad_ai.ui.settings_dialog.get_config", lambda: cfg)
 
         SettingsDialog._load_from_config(fake)
 
-        fake.provider_section.load.assert_called_once_with(cfg)
+        fake.provider_page.load.assert_called_once_with(cfg)
 
 
 # Test Connection used to stage the visible widget values in the config
@@ -513,7 +518,7 @@ class TestParamsTableShowsOnlyTheProfile:
         section = MagicMock()
         section.current_provider_name.return_value = prof.name
         section.current_profile.return_value = prof
-        fake = types.SimpleNamespace(_cfg=cfg, provider_section=section)
+        fake = types.SimpleNamespace(_cfg=cfg, section=section)
         fake._captured = {}
         fake._populate_model_params_table = fake._captured.update
         return fake
@@ -524,7 +529,7 @@ class TestParamsTableShowsOnlyTheProfile:
         prof.params = {"temperature": 0.9, "top_p": 0.5}
 
         fake = self._fake(cfg, "cloud")
-        SettingsDialog._load_model_params_table(fake, prof.model, cfg, prof)
+        ProviderPage._load_model_params_table(fake, prof.model, cfg, prof)
 
         assert fake._captured == {"temperature": 0.9, "top_p": 0.5}
 
@@ -537,7 +542,7 @@ class TestParamsTableShowsOnlyTheProfile:
         cfg.model_params = {prof.model: {"temperature": 0.1, "max_tokens": 999}}
 
         fake = self._fake(cfg, "cloud")
-        SettingsDialog._load_model_params_table(fake, prof.model, cfg, prof)
+        ProviderPage._load_model_params_table(fake, prof.model, cfg, prof)
 
         assert fake._captured == {"temperature": 0.9}
 
@@ -549,7 +554,7 @@ class TestParamsTableShowsOnlyTheProfile:
         cfg.model_params = {prof.model: {"temperature": 0.1}}
 
         fake = self._fake(cfg, "cloud")
-        SettingsDialog._load_model_params_table(fake, prof.model, cfg, prof)
+        ProviderPage._load_model_params_table(fake, prof.model, cfg, prof)
 
         expected = dict(PROVIDER_PRESETS["anthropic"].get("default_params", {}))
         if expected:
@@ -567,10 +572,10 @@ class TestParamsTableShowsOnlyTheProfile:
         # An index with no default_params of its own, so only the last
         # fallback can fire.
         with mock.patch.dict(
-                "freecad_ai.ui.settings_dialog.PROVIDER_PRESETS",
+                "freecad_ai.ui.settings_pages.provider_page.PROVIDER_PRESETS",
                 {"anthropic": {"base_url": "", "default_model": "",
                                "default_params": {}}}):
-            SettingsDialog._load_model_params_table(fake, prof.model, cfg, prof)
+            ProviderPage._load_model_params_table(fake, prof.model, cfg, prof)
 
         assert fake._captured == {"temperature": 0.42}
 
@@ -595,7 +600,8 @@ class TestOnModelChangedDoesNotMutateLiveConfig:
         fake = types.SimpleNamespace(
             _cfg=cfg,
             _last_model_name=prof.model,
-            provider_section=section,
+            section=section,
+            _loaded_params={},
         )
         fake._read_model_params_table = lambda: {"temperature": 0.42}
         fake._populate_model_params_table = lambda params: None
@@ -604,7 +610,7 @@ class TestOnModelChangedDoesNotMutateLiveConfig:
             fake._last_model_name = model
         fake._load_model_params_table = _stub_load
 
-        SettingsDialog._on_model_changed(fake, "new-model-name")
+        ProviderPage._on_model_changed(fake, "new-model-name")
 
         assert cfg.model_params == original_model_params
         assert prof.params == {"temperature": 0.42}
@@ -616,14 +622,17 @@ class TestTestConnectionKeyResolution:
     does, or a profile that inherits the vendor-wide key fails Test
     Connection even though real chat works."""
 
-    def _fake(self, cfg, api_key_text, provider_name="anthropic"):
+    def _fake(self, cfg, api_key_text, provider_name="anthropic", monkeypatch=None):
         fake = MagicMock()
         fake._cfg = cfg
-        fake.provider_section.current_profile.return_value = ProviderConfig(
+        fake.section.current_profile.return_value = ProviderConfig(
             name=provider_name, base_url="http://example/v1",
             api_key=api_key_text, model="some-model")
-        fake.provider_section.current_label.return_value = "cloud"
-        fake.thinking_combo.currentIndex.return_value = 0
+        fake.section.current_label.return_value = "cloud"
+        if monkeypatch is not None:
+            monkeypatch.setattr(
+                "freecad_ai.ui.settings_pages.provider_page.get_config",
+                lambda: cfg)
         return fake
 
     def _capture_thread_api_key(self, monkeypatch, captured):
@@ -632,38 +641,39 @@ class TestTestConnectionKeyResolution:
             captured["api_key"] = api_key
             return MagicMock()
         monkeypatch.setattr(
-            "freecad_ai.ui.settings_dialog._TestConnectionThread", fake_thread)
+            "freecad_ai.ui.settings_pages.provider_page._TestConnectionThread",
+            fake_thread)
 
     def test_profile_key_wins_over_provider_keys(self, monkeypatch):
         cfg = _cfg()
         cfg.provider_keys = {"anthropic": "vendor-default"}
-        fake = self._fake(cfg, "profile-key")
+        fake = self._fake(cfg, "profile-key", monkeypatch=monkeypatch)
         captured = {}
         self._capture_thread_api_key(monkeypatch, captured)
 
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
         assert captured["api_key"] == "profile-key"
 
     def test_blank_profile_key_falls_back_to_provider_keys(self, monkeypatch):
         cfg = _cfg()
         cfg.provider_keys = {"anthropic": "vendor-default"}
-        fake = self._fake(cfg, "")
+        fake = self._fake(cfg, "", monkeypatch=monkeypatch)
         captured = {}
         self._capture_thread_api_key(monkeypatch, captured)
 
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
         assert captured["api_key"] == "vendor-default"
 
     def test_both_blank_yields_empty_string(self, monkeypatch):
         cfg = _cfg()
         cfg.provider_keys = {}
-        fake = self._fake(cfg, "")
+        fake = self._fake(cfg, "", monkeypatch=monkeypatch)
         captured = {}
         self._capture_thread_api_key(monkeypatch, captured)
 
-        SettingsDialog._test_connection(fake)
+        ProviderPage._test_connection(fake)
 
         assert captured["api_key"] == ""
 
@@ -686,6 +696,7 @@ def _selector_fake(cfg, label="cloud"):
         _active_profile=cfg.active_profile,
         _utility_profiles=cfg.utility_profiles,
         _current_profile_label=label,
+        _pending_rerank_label=None,
         profile_combo=_ProfileCombo(),
         profile_active_check=_Check(),
         api_key_edit=_Edit(),
@@ -706,6 +717,8 @@ def _selector_fake(cfg, label="cloud"):
     fake._rename_profile = (
         lambda old, new: ProviderSection._rename_profile(fake, old, new))
     fake._update_vision_ui = lambda profile: None
+    fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
+    fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
     return fake
 
 

@@ -155,12 +155,12 @@ pytestmark_qt = pytest.mark.skipif(
     not _HAVE_QT, reason="PySide6/PySide2 not available")
 
 
-def _fake_dialog(cfg, shown="chat"):
+def _fake_page(cfg, shown="chat"):
     """A fake self carrying only what the methods under test touch.
 
     Serves both sides of the #99 split: ProviderSection's profile methods
-    read the widgets below, and the dialog's probe handlers reach the
-    section through the auto-created ``fake.provider_section``."""
+    read the widgets below, and ProviderPage's probe handlers (#101) reach
+    the section through the auto-created ``fake.section``."""
     from unittest import mock
     fake = mock.MagicMock()
     fake._cfg = cfg
@@ -185,39 +185,39 @@ class TestProbesWriteToTheProbedProfile:
     job (TestProbeResult in test_provider_section.py)."""
 
     def test_vision_probe_writes_to_the_probed_profile(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.settings_pages.provider_page import ProviderPage
         cfg = _two_profiles()
-        fake = _fake_dialog(cfg, shown="rerank")
+        fake = _fake_page(cfg, shown="rerank")
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_vision_probed(fake, True)
+        ProviderPage._on_vision_probed(fake, True)
 
-        fake.provider_section.set_probe_result.assert_called_once_with(
+        fake.section.set_probe_result.assert_called_once_with(
             "rerank", vision=True)
 
     def test_capability_probe_writes_to_the_probed_profile(self):
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.settings_pages.provider_page import ProviderPage
         cfg = _two_profiles()
-        fake = _fake_dialog(cfg, shown="rerank")
+        fake = _fake_page(cfg, shown="rerank")
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_capabilities_detected(
+        ProviderPage._on_capabilities_detected(
             fake, {"vision": False, "tools": False, "thinking": True})
 
-        fake.provider_section.set_probe_result.assert_called_once_with(
+        fake.section.set_probe_result.assert_called_once_with(
             "rerank", tools=False, thinking=True)
 
     def test_a_non_ollama_probe_reports_no_tools_or_thinking(self):
         """Non-Ollama providers emit only "vision": tools/thinking must
         stay unreported (None), not become False."""
-        from freecad_ai.ui.settings_dialog import SettingsDialog
+        from freecad_ai.ui.settings_pages.provider_page import ProviderPage
         cfg = _two_profiles()
-        fake = _fake_dialog(cfg, shown="rerank")
+        fake = _fake_page(cfg, shown="rerank")
         fake._test_profile_label = "rerank"
 
-        SettingsDialog._on_capabilities_detected(fake, {"vision": True})
+        ProviderPage._on_capabilities_detected(fake, {"vision": True})
 
-        fake.provider_section.set_probe_result.assert_called_once_with(
+        fake.section.set_probe_result.assert_called_once_with(
             "rerank")
 
 
@@ -232,7 +232,7 @@ class TestStaleDetectionIsClearedPerProfile:
         cfg.profiles["chat"].vision_detected = True
         cfg.profiles["chat"].tools_detected = True
         cfg.profiles["chat"].thinking_detected = True
-        fake = _fake_dialog(cfg, shown="chat")
+        fake = _fake_page(cfg, shown="chat")
         fake.model_edit.text.return_value = "some-other-model"
 
         ProviderSection._commit_profile_fields(fake)
@@ -248,7 +248,7 @@ class TestStaleDetectionIsClearedPerProfile:
         cfg = _two_profiles()
         cfg.profiles["chat"].vision_detected = True
         cfg.profiles["chat"].tools_detected = False
-        fake = _fake_dialog(cfg, shown="chat")
+        fake = _fake_page(cfg, shown="chat")
 
         ProviderSection._commit_profile_fields(fake)
 
@@ -260,7 +260,7 @@ class TestStaleDetectionIsClearedPerProfile:
         from freecad_ai.llm.providers import get_provider_names
         cfg = _two_profiles()
         cfg.profiles["chat"].vision_detected = True
-        fake = _fake_dialog(cfg, shown="chat")
+        fake = _fake_page(cfg, shown="chat")
         names = get_provider_names()
         fake.provider_combo.currentIndex.return_value = names.index("anthropic")
 
@@ -273,7 +273,7 @@ class TestStaleDetectionIsClearedPerProfile:
         from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         cfg.profiles["rerank"].vision_detected = False
-        fake = _fake_dialog(cfg, shown="chat")
+        fake = _fake_page(cfg, shown="chat")
         fake.model_edit.text.return_value = "some-other-model"
 
         ProviderSection._commit_profile_fields(fake)
@@ -286,7 +286,7 @@ class TestVisionOverrideIsAProfileField:
     def test_commit_writes_the_override_into_the_shown_profile(self):
         from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
-        fake = _fake_dialog(cfg, shown="rerank")
+        fake = _fake_page(cfg, shown="rerank")
         fake._vision_override_value = True
 
         ProviderSection._commit_profile_fields(fake)
@@ -298,7 +298,7 @@ class TestVisionOverrideIsAProfileField:
         from freecad_ai.ui.provider_section import ProviderSection
         cfg = _two_profiles()
         cfg.profiles["rerank"].vision_detected = False
-        fake = _fake_dialog(cfg, shown="chat")
+        fake = _fake_page(cfg, shown="chat")
 
         ProviderSection._show_profile(fake, "rerank")
 

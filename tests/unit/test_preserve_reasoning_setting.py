@@ -15,44 +15,38 @@ pinned here rather than assumed.
 """
 
 import inspect
-from unittest import mock
+import os
 
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest  # noqa: E402
 
 try:
-    import PySide6  # noqa: F401
+    from PySide6 import QtWidgets
 except ImportError:
     try:
-        import PySide2  # noqa: F401
+        from PySide2 import QtWidgets
     except ImportError:
         pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
 
 from freecad_ai.config import AppConfig  # noqa: E402
 from freecad_ai.ui import chat_widget as cw  # noqa: E402
-from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
+from freecad_ai.ui.settings_pages.behavior_page import BehaviorPage  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    return app
 
 
 @pytest.fixture
-def cfg(monkeypatch):
-    c = AppConfig()
-    monkeypatch.setattr("freecad_ai.ui.settings_dialog.get_config", lambda: c)
-    monkeypatch.setattr(
-        "freecad_ai.ui.settings_dialog.save_current_config", lambda: None)
-    return c
-
-
-def _fake_save_dialog(preserve):
-    """A fake self carrying what _save indexes or reads for real."""
-    fake = mock.MagicMock()
-    for combo in ("thinking_combo", "viewport_capture_combo",
-                  "viewport_resolution_combo", "rerank_method_combo"):
-        getattr(fake, combo).currentIndex.return_value = 0
-    fake.rerank_pinned_edit.text.return_value = ""
-    fake._parse_server_address.return_value = ("127.0.0.1", 8765)
-    fake.prompt_cache_check.isChecked.return_value = False
-    fake.log_usage_check.isChecked.return_value = False
-    fake.preserve_reasoning_check.isChecked.return_value = preserve
-    return fake
+def page(qapp, tmp_config_dir):
+    p = BehaviorPage()
+    yield p
+    p.deleteLater()
 
 
 class TestTheDefault:
@@ -70,38 +64,41 @@ class TestTheDefault:
 
 class TestOKWritesItToTheConfig:
 
-    def test_unticked_turns_it_off(self, cfg):
-        SettingsDialog._save(_fake_save_dialog(False))
+    def test_unticked_turns_it_off(self, page):
+        page.load(AppConfig())
+        page.preserve_reasoning_check.setChecked(False)
+        target = AppConfig()
 
-        assert cfg.preserve_reasoning_history is False
+        page.apply_to(target)
 
-    def test_ticked_writes_true_not_merely_leaves_the_default(self, cfg):
+        assert target.preserve_reasoning_history is False
+
+    def test_ticked_writes_true_not_merely_leaves_the_default(self, page):
         """Start from False, so an absent write leaves False and fails."""
+        cfg = AppConfig()
         cfg.preserve_reasoning_history = False
+        page.load(cfg)
 
-        SettingsDialog._save(_fake_save_dialog(True))
+        page.preserve_reasoning_check.setChecked(True)
+        page.apply_to(cfg)
 
         assert cfg.preserve_reasoning_history is True
 
 
 class TestReopeningTheDialogShowsWhatWasSaved:
 
-    def test_an_off_config_leaves_it_unticked(self, cfg):
+    def test_an_off_config_leaves_it_unticked(self, page):
+        cfg = AppConfig()
         cfg.preserve_reasoning_history = False
-        fake = mock.MagicMock()
-        fake._cfg = cfg
 
-        SettingsDialog._load_from_config(fake)
+        page.load(cfg)
 
-        fake.preserve_reasoning_check.setChecked.assert_called_once_with(False)
+        assert page.preserve_reasoning_check.isChecked() is False
 
-    def test_an_on_config_ticks_it(self, cfg):
-        fake = mock.MagicMock()
-        fake._cfg = cfg
+    def test_an_on_config_ticks_it(self, page):
+        page.load(AppConfig())
 
-        SettingsDialog._load_from_config(fake)
-
-        fake.preserve_reasoning_check.setChecked.assert_called_once_with(True)
+        assert page.preserve_reasoning_check.isChecked() is True
 
 
 class TestTheWorkerActuallyConsultsIt:

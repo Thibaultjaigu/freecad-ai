@@ -47,6 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   parsed, the migration is skipped and retried once the file is fixed, so
   it never overwrites a broken `config.json`. Scripts reading
   `ParamGet(".../Mod/FreeCADAI")` stop seeing values (#99).
+- **Edit → Preferences → FreeCAD AI now shows every setting**, in four pages
+  (Provider, Behavior, Tools, MCP) built from the same widgets as the
+  Settings dialog, so the two windows can no longer disagree (#101).
+- The Settings dialog writes only the fields you changed, so a hand-edited
+  value a dropdown cannot show is no longer overwritten by an unrelated OK.
+- Fields regrouped: a new *Limits* group (max output tokens, context
+  window, max tool-loop turns, code execution timeout); viewport capture
+  moved into *Behavior*; the MCP group split into *MCP Servers* and
+  *Built-in MCP Server*. "Model supports tool calling" is now "Use tool
+  calling", which is what the switch does.
+- *Default mode* is gone from Preferences: the chat panel's Plan/Act
+  dropdown is the control, and it overwrote the Preferences value anyway.
+- *Test Reranker* moved next to the Reranker utility dropdown. A provider's
+  recommended reranker settings (#10) now apply when you save rather than
+  flipping the fields on screen.
+- Test Connection uses the saved max output tokens and thinking mode.
+- Test Connection now sits with the provider fields inside the scrolling
+  page, no longer beside OK/Cancel.
 
 ### Fixed
 
@@ -63,6 +81,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   appended, and Cloudflare Workers AI moved down in the Settings dialog to
   match. Since #99 the page shares the Settings dialog's provider list, so
   the lists cannot diverge again.
+- A profile whose provider this version does not know is shown as
+  "<name> (unknown provider)" instead of as Anthropic, and picking
+  Anthropic for it actually switches (#101).
+- An untouched profile's Model Parameters table no longer becomes a
+  profile override on Save. The table previews what `resolve_params()`
+  would actually send — a provider default, or the global temperature —
+  for a profile with no params of its own, so you can see it; committing
+  that unedited preview silently pinned it onto the profile as an explicit
+  override. The Settings dialog and the Preferences Provider page now write
+  the table back only when it has actually changed (#101).
 
 ## [0.30.0-alpha] - 2026-09-23
 
