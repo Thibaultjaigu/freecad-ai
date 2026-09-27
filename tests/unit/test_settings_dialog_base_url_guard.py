@@ -105,6 +105,14 @@ class TestSaveIsWiredToTheGuard:
     def _fake(self, allowed):
         return types.SimpleNamespace(
             provider_section=MagicMock(),
+            # _save writes profiles through provider_page.apply_to (#101),
+            # never provider_section.apply_to directly; the other three
+            # pages are here so a broken guard (allowed=True) reaches them
+            # without an unrelated AttributeError masking the real failure.
+            provider_page=MagicMock(),
+            behavior_page=MagicMock(),
+            mcp_page=MagicMock(),
+            tools_page=MagicMock(),
             _confirm_incomplete_profiles=MagicMock(return_value=allowed),
             accept=MagicMock())
 
@@ -118,7 +126,7 @@ class TestSaveIsWiredToTheGuard:
                         return_value=cfg):
             SettingsDialog._save(fake)
         assert cfg.profiles == before
-        fake.provider_section.apply_to.assert_not_called()
+        fake.provider_page.apply_to.assert_not_called()
         fake.accept.assert_not_called()
 
     def test_the_visible_edits_are_committed_before_the_guard_runs(self):
