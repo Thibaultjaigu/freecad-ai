@@ -143,3 +143,36 @@ def test_edit_survives_save_and_resolve_params(dialog, cfg):
     dialog._populate_model_params_table({"temperature": 0.2})
     dialog._save()
     assert resolve_params(cfg, cfg.provider)["temperature"] == 0.2
+
+
+def test_on_close_requested_save_calls_save(dialog, monkeypatch):
+    """ToolsPage's editor prompt (#101): Save means the dialog's own OK path."""
+    calls = []
+    monkeypatch.setattr(dialog, "_save", lambda: calls.append("save"))
+    monkeypatch.setattr(dialog, "reject", lambda: calls.append("reject"))
+    dialog._on_close_requested(True)
+    assert calls == ["save"]
+
+
+def test_on_close_requested_discard_calls_reject(dialog, monkeypatch):
+    """...and Discard means Cancel, not a bespoke third outcome."""
+    calls = []
+    monkeypatch.setattr(dialog, "_save", lambda: calls.append("save"))
+    monkeypatch.setattr(dialog, "reject", lambda: calls.append("reject"))
+    dialog._on_close_requested(False)
+    assert calls == ["reject"]
+
+
+def test_tools_page_close_request_is_wired_to_the_dialog(dialog, monkeypatch):
+    """A fake self can't show a signal is connected -- emit it on the real
+    tools_page and confirm the dialog's own slot is what runs."""
+    calls = []
+    monkeypatch.setattr(dialog, "_save", lambda: calls.append("save"))
+    monkeypatch.setattr(dialog, "reject", lambda: calls.append("reject"))
+
+    dialog.tools_page.closeHostRequested.emit(True)
+    assert calls == ["save"]
+
+    calls.clear()
+    dialog.tools_page.closeHostRequested.emit(False)
+    assert calls == ["reject"]

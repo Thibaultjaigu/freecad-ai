@@ -252,13 +252,13 @@ class ToolsPage(SettingsPage):
             self._user_tool_files.append(fname)
 
             if not vr.valid:
-                label = f"✗ {fname} — {vr.error}"
+                label = f"\u2717 {fname} \u2014 {vr.error}"
             elif vr.warnings:
                 func_names = ", ".join(f.name for f in vr.functions)
-                label = f"⚠ {fname} ({func_names}) — {'; '.join(vr.warnings)}"
+                label = f"\u26a0 {fname} ({func_names}) \u2014 {'; '.join(vr.warnings)}"
             else:
                 func_names = ", ".join(f.name for f in vr.functions)
-                label = f"✓ {fname} ({func_names})"
+                label = f"\u2713 {fname} ({func_names})"
 
             if fname in disabled:
                 label = f"(disabled) {label}"
@@ -367,10 +367,10 @@ class ToolsPage(SettingsPage):
             from ...hooks import get_hook_registry
             for hook in get_hook_registry().discovered_hooks:
                 if hook["has_error"]:
-                    label = f"✗ {hook['name']} ({hook['error_message'][:50]})"
+                    label = f"\u2717 {hook['name']} ({hook['error_message'][:50]})"
                 else:
                     events = ", ".join(hook["events"])
-                    label = f"✓ {hook['name']} ({events})"
+                    label = f"\u2713 {hook['name']} ({events})"
                 self.hooks_list.addItem(label)
         except Exception:
             pass
@@ -547,6 +547,7 @@ class ToolsPage(SettingsPage):
             pass
         self._refresh_hooks_list()
 
+
     # ── Skills management ──────────────────────────────────────
 
     def _refresh_skills_list(self):
@@ -562,13 +563,13 @@ class ToolsPage(SettingsPage):
             desc = info["description"]
 
             if source == "modified":
-                icon = "⚠"  # ⚠
+                icon = "\u26a0"  # ⚠
                 tag = "modified"
             elif source == "user":
-                icon = "☆"  # ☆
+                icon = "\u2606"  # ☆
                 tag = "user"
             else:
-                icon = "✓"  # ✓
+                icon = "\u2713"  # ✓
                 tag = "built-in"
 
             label = f"{icon} {name} ({tag})"
