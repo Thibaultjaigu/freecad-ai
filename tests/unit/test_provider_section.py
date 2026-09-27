@@ -210,6 +210,53 @@ class TestUnknownProvider:
         section.apply_to(out)
         assert out.profiles["cloud"].name == "ollama"
 
+    def test_the_stored_name_is_shown_not_the_first_provider(self, section):
+        section.load(self._cfg())
+        combo = section.provider_combo
+        assert combo.currentIndex() == combo.count() - 1
+        assert combo.currentText() == "futurevendor (unknown provider)"
+        assert combo.currentData() == "futurevendor"
+        assert combo.count() == len(get_provider_names()) + 1
+
+    def test_a_known_profile_removes_the_temporary_item(self, section):
+        section.load(self._cfg())
+        section.profile_combo.setCurrentIndex(
+            section.profile_combo.findData("local"))
+        assert section.provider_combo.count() == len(get_provider_names())
+        assert section.provider_combo.currentText() != ""
+        assert section.current_provider_name() == "ollama"
+
+    def test_switching_back_and_forth_never_duplicates_it(self, section):
+        section.load(self._cfg())
+        for label in ("local", "cloud", "local", "cloud"):
+            section.profile_combo.setCurrentIndex(
+                section.profile_combo.findData(label))
+        assert section.provider_combo.count() == len(get_provider_names()) + 1
+        texts = [section.provider_combo.itemText(i)
+                 for i in range(section.provider_combo.count())]
+        assert texts.count("futurevendor (unknown provider)") == 1
+
+    def test_picking_the_first_provider_really_switches(self, section):
+        """The old stand-in *was* index 0, so picking Anthropic was a no-op."""
+        section.load(self._cfg())
+        first = get_provider_names()[0]
+        section.provider_combo.setCurrentIndex(0)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.profiles["cloud"].name == first
+        assert section.provider_combo.count() == len(get_provider_names())
+
+    def test_the_real_pick_applies_the_preset(self, section):
+        section.load(self._cfg())
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("ollama"))
+        assert section.base_url_edit.text() == \
+            PROVIDER_PRESETS["ollama"]["base_url"]
+
+    def test_current_provider_name_is_empty_while_unknown(self, section):
+        section.load(self._cfg())
+        assert section.current_provider_name() == ""
+
 
 class TestProbeResult:
     def test_it_lands_on_the_named_profile(self, section):

@@ -52,14 +52,29 @@ def _make_fake_section(base_url="http://gateway.example/v1", model="my-model"):
     base_url_edit.text.return_value = base_url
     model_edit = MagicMock()
     model_edit.text.return_value = model
-    return SimpleNamespace(
+    provider_combo = MagicMock()
+    provider_combo.count.return_value = len(get_provider_names())
+    provider_combo.removeItem = MagicMock()
+    fake = SimpleNamespace(
         base_url_edit=base_url_edit,
         model_edit=model_edit,
+        provider_combo=provider_combo,
         profileShown=_Sig(),
         aboutToCommit=_Sig(),
         presetApplied=_Sig(),
         _commit_profile_fields=MagicMock(),
     )
+    fake._unknown_item_index = lambda: (
+        len(get_provider_names())
+        if fake.provider_combo.count() > len(get_provider_names())
+        else None
+    )
+    fake._drop_unknown_item = lambda: (
+        fake.provider_combo.removeItem(fake._unknown_item_index())
+        if fake._unknown_item_index() is not None
+        else None
+    )
+    return fake
 
 
 def _make_fake_dialog(model="my-model", profile=None, rerank_untouched=False):

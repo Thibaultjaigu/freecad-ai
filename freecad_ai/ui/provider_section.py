@@ -86,7 +86,6 @@ class ProviderSection(QWidget):
         self._active_profile = ""
         self._utility_profiles = {}
         self._current_profile_label = None
-        self._stand_in_index = None
         self._baseline = None
         self._build_ui()
 
@@ -558,14 +557,9 @@ class ProviderSection(QWidget):
             return
         names = get_provider_names()
         idx = self.provider_combo.currentIndex()
+        # Index past the registry = the temporary unknown-provider item:
+        # not a choice, so the stored name stays (#97 in another shape).
         new_name = names[idx] if 0 <= idx < len(names) else prof.name
-        # A provider the combo cannot show (a hand edit, or a config from
-        # a newer version) is displayed as a stand-in entry by
-        # _show_profile. Until the user picks something, that entry is not
-        # a choice, and writing it back is #97 in another shape.
-        if (prof.name not in names
-                and idx == getattr(self, "_stand_in_index", None)):
-            new_name = prof.name
         new_model = self.model_edit.text()
         # A probe result describes one provider+model pair. Retype either
         # and the stored answer is about something else, so drop it —
@@ -586,17 +580,44 @@ class ProviderSection(QWidget):
         # here; the preferences page has no table and leaves them alone.
         self.aboutToCommit.emit(prof)
 
+    def _unknown_item_index(self):
+        """Index of the temporary "<name> (unknown provider)" item, if any.
+
+        It is always the last item, past the registry's providers, so the
+        registry indices every other method relies on never shift.
+        """
+        n = len(get_provider_names())
+        return n if self.provider_combo.count() > n else None
+
+    def _drop_unknown_item(self):
+        idx = self._unknown_item_index()
+        if idx is not None:
+            self.provider_combo.blockSignals(True)
+            try:
+                self.provider_combo.removeItem(idx)
+            finally:
+                self.provider_combo.blockSignals(False)
+
     def _show_profile(self, label: str) -> None:
         """Populate the connection widgets from a profile."""
         prof = self._profiles[label]
         self._current_profile_label = label
         names = get_provider_names()
-        try:
+        self._drop_unknown_item()
+        if prof.name in names:
             idx = names.index(prof.name)
-            self._stand_in_index = None
-        except ValueError:
-            idx = 0
-            self._stand_in_index = idx
+        else:
+            # A provider the registry lacks (a hand edit, or a config from a
+            # newer version) is shown as itself, never as a real provider it
+            # is not, which would make picking that provider a no-op.
+            self.provider_combo.blockSignals(True)
+            try:
+                self.provider_combo.addItem(
+                    translate("SettingsDialog", "%s (unknown provider)")
+                    % prof.name, prof.name)
+            finally:
+                self.provider_combo.blockSignals(False)
+            idx = len(names)
         # Programmatic index moves must not run _on_provider_changed —
         # that handler exists to apply a preset on a *user* switch, and
         # firing it here would overwrite the profile's saved URL (#75).
@@ -629,6 +650,7 @@ class ProviderSection(QWidget):
         names = get_provider_names()
         if not 0 <= index < len(names):
             return
+        self._drop_unknown_item()
         preset = PROVIDER_PRESETS.get(names[index], {})
         # Only overwrite when the preset has a concrete value. The
         # "custom" preset ships empty strings — wiping the user's

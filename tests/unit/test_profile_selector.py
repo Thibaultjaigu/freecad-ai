@@ -189,6 +189,7 @@ class _Combo:
     def __init__(self, index=0):
         self._i = index
         self.calls = []
+        self.items = []          # [(text, data)] for count() and removeItem()
 
     def currentIndex(self):
         return self._i
@@ -199,6 +200,16 @@ class _Combo:
 
     def blockSignals(self, b):
         self.calls.append(("block", b))
+
+    def count(self):
+        return len(self.items)
+
+    def addItem(self, text, data=None):
+        self.items.append((text, data))
+
+    def removeItem(self, index):
+        if 0 <= index < len(self.items):
+            self.items.pop(index)
 
 
 class _Check:
@@ -297,6 +308,16 @@ class TestProfileFieldRoundTrip:
             presetApplied=_Sig(),
         )
         fake._update_vision_ui = lambda profile: None
+        fake._unknown_item_index = lambda: (
+            len(get_provider_names())
+            if fake.provider_combo.count() > len(get_provider_names())
+            else None
+        )
+        fake._drop_unknown_item = lambda: (
+            fake.provider_combo.removeItem(fake._unknown_item_index())
+            if fake._unknown_item_index() is not None
+            else None
+        )
         return fake
 
     def test_edited_base_url_survives_switching_away_and_back(self):
@@ -706,6 +727,16 @@ def _selector_fake(cfg, label="cloud"):
     fake._rename_profile = (
         lambda old, new: ProviderSection._rename_profile(fake, old, new))
     fake._update_vision_ui = lambda profile: None
+    fake._unknown_item_index = lambda: (
+        len(get_provider_names())
+        if fake.provider_combo.count() > len(get_provider_names())
+        else None
+    )
+    fake._drop_unknown_item = lambda: (
+        fake.provider_combo.removeItem(fake._unknown_item_index())
+        if fake._unknown_item_index() is not None
+        else None
+    )
     return fake
 
 
