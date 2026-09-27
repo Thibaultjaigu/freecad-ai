@@ -191,6 +191,10 @@ class ProviderPage(SettingsPage):
         # temperature), not the profile's own state. Comparing against it
         # is how commit tells an actual edit from that unedited preview.
         self._loaded_params = {}
+        # The running probes, held until their last signal (see
+        # _release_thread).
+        self._test_thread = None
+        self._rerank_test_thread = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -522,8 +526,26 @@ class ProviderPage(SettingsPage):
             self._on_rerank_test_finished)
         self._rerank_test_thread.start()
 
+    def _release_thread(self, attr):
+        """Free a probe thread once its last signal has arrived.
+
+        Called only from the slot for the last emit in run(), so wait()
+        covers just run()'s return. The page's reference is cleared last:
+        it is what keeps the Python wrapper, and so the thread, alive
+        until then. Each click otherwise leaked the thread (parented to
+        the QApplication) and the LLM client it held.
+        """
+        thread = getattr(self, attr)
+        if thread is None:
+            return
+        thread.wait()
+        thread.deleteLater()
+        setattr(self, attr, None)
+
     def _on_rerank_test_finished(self, success: bool, message: str):
         """Render the reranker test outcome in the status label."""
+        # Every path through _TestRerankerThread.run() ends in this emit.
+        self._release_thread("_rerank_test_thread")
         self._rerank_test_btn.setEnabled(True)
         label = getattr(self, "_rerank_test_profile_label", "")
         if success:
@@ -591,6 +613,9 @@ class ProviderPage(SettingsPage):
             self.test_status.setText(self._probe_result_text(label, message))
             self.test_status.setStyleSheet("color: #2e7d32;")
         else:
+            # A failure is run()'s last emit; on success the capability
+            # probe follows, and _on_capabilities_detected releases it.
+            self._release_thread("_test_thread")
             # No vision probe on failure — re-enable buttons now
             self.test_btn.setEnabled(True)
             self.busyChanged.emit(False)
@@ -633,6 +658,8 @@ class ProviderPage(SettingsPage):
         emit only "vision" — tools/thinking stay None to keep falling back
         to the provider-wide static flag.
         """
+        # The last emit of a successful _TestConnectionThread.run().
+        self._release_thread("_test_thread")
         self.section.set_probe_result(
             getattr(self, "_test_profile_label", None),
             **{k: bool(caps[k]) for k in ("tools", "thinking") if k in caps})

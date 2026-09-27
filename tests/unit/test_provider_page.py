@@ -118,6 +118,12 @@ class TestConnectionProbe:
             def start(self):
                 made["started"] = True
 
+            def wait(self):
+                pass
+
+            def deleteLater(self):
+                pass
+
         monkeypatch.setattr(pp_mod, "_TestConnectionThread", _T)
         return made
 
@@ -146,3 +152,68 @@ class TestConnectionProbe:
         page._test_connection()
         page._on_test_finished(False, "nope")
         assert got == [True, False]
+
+
+class TestProbeThreadsAreFreed:
+    """Each Test Connection / Test Reranker click used to leak its QThread
+    (parented to the QApplication, never deleted) and the LLM client in it.
+    Real threads here, with a fake LLMClient that answers at once."""
+
+    @pytest.fixture
+    def fake_client(self, monkeypatch, tmp_config_dir):
+        behaviour = {"fail": False}
+
+        class _Client:
+            def __init__(self, **kwargs):
+                pass
+
+            def test_connection(self):
+                if behaviour["fail"]:
+                    raise RuntimeError("refused")
+                return "pong"
+
+            def detect_capabilities(self):
+                return {"vision": False, "tools": True}
+
+        monkeypatch.setattr("freecad_ai.llm.client.LLMClient", _Client)
+        return behaviour
+
+    @staticmethod
+    def _run_to_completion(qapp, page, attr):
+        import time
+        from freecad_ai.ui.compat import QtCore
+        thread = getattr(page, attr)
+        assert thread is not None
+        destroyed = []
+        thread.destroyed.connect(lambda *_: destroyed.append(True))
+        deadline = time.monotonic() + 10
+        while getattr(page, attr) is not None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert getattr(page, attr) is None
+        QtCore.QCoreApplication.sendPostedEvents(
+            None, QtCore.QEvent.DeferredDelete)
+        assert destroyed == [True]
+
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_test_connection_frees_its_thread(self, qapp, page, fake_client,
+                                              fail):
+        fake_client["fail"] = fail
+        page.load(_cfg())
+        page._test_connection()
+        self._run_to_completion(qapp, page, "_test_thread")
+        assert page.test_btn.isEnabled()
+        if not fail:
+            # The capabilities answer still landed before the release.
+            assert page.section.profiles()["cloud"].tools_detected is True
+
+    def test_test_reranker_frees_its_thread(self, qapp, page, fake_client,
+                                            monkeypatch):
+        monkeypatch.setattr(
+            "freecad_ai.tools.reranker.rerank_tools_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+        page.load(_cfg())
+        page._test_reranker()
+        self._run_to_completion(qapp, page, "_rerank_test_thread")
+        assert page._rerank_test_btn.isEnabled()
+        assert "down" in page._rerank_test_status.text()
