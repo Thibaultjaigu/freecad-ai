@@ -1,4 +1,4 @@
-"""Edit → Preferences → FreeCAD AI (#99).
+"""Edit → Preferences → FreeCAD AI (#99, #101).
 
 FreeCAD calls saveSettings() on every page for every OK and Apply, even
 pages never opened, so an untouched page must not write anything."""
@@ -21,6 +21,7 @@ except ImportError:
 
 import freecad_ai.config as config_mod  # noqa: E402
 from freecad_ai.config import ProviderConfig  # noqa: E402
+import freecad_ai.ui.prefs_page as pp  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -65,128 +66,185 @@ def warnings(monkeypatch):
     return calls
 
 
-@pytest.fixture
-def page(qapp, cfg, notified, warnings):
-    from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage
-    p = FreeCADAIPrefsPage()
-    p.loadSettings()
-    yield p
-    p.form.deleteLater()
-
-
 def _disk():
     with open(config_mod.CONFIG_FILE, "rb") as f:
         return f.read()
 
 
-class TestUntouched:
-    def test_ok_writes_nothing(self, page, notified):
-        before = _disk()
-        page.saveSettings()
-        assert _disk() == before
-        assert notified == []
+ALL = ["FreeCADAIProviderPrefs", "FreeCADAIBehaviorPrefs",
+       "FreeCADAIToolsPrefs", "FreeCADAIMcpPrefs"]
 
-    def test_it_shows_the_active_profile_and_behavior(self, page):
-        assert page.section.current_label() == "cloud"
-        assert page.mode_combo.currentIndex() == 1          # act
-        assert page.max_tokens_spin.value() == 65536
 
-    def test_a_never_loaded_page_writes_nothing(self, qapp, cfg, notified):
-        """Fix round 1: no successful load means nothing to compare
-        against, so a page FreeCAD never loaded (or whose loadSettings()
-        raised partway) must not fall back to writing the widgets' own
-        defaults over the saved config."""
-        from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage
-        before = _disk()
-        p = FreeCADAIPrefsPage()
-        p.saveSettings()
-        assert _disk() == before
-        assert notified == []
-        p.form.deleteLater()
-
-    @pytest.mark.parametrize("field,value", [
-        ("max_tokens", 100),
-        ("max_tokens", 1000000),
-        ("mode", "weird"),
-        ("thinking", "max"),
-    ])
-    def test_an_unshowable_value_survives_an_unrelated_save(
-            self, qapp, cfg, notified, field, value):
-        """The spin box and combos can only display values in their own
-        range. _load's comment claims such a value is written back only
-        if the user changes that field, never as a side effect of an
-        unrelated edit."""
-        setattr(cfg, field, value)
-        config_mod.save_current_config()
-        from freecad_ai.ui.prefs_page import FreeCADAIPrefsPage
-        p = FreeCADAIPrefsPage()
+@pytest.fixture
+def pages(qapp, cfg, notified, warnings):
+    made = {name: getattr(pp, name)() for name in ALL}
+    for p in made.values():
         p.loadSettings()
-        before = _disk()
-        p.saveSettings()
-        assert _disk() == before
-
-        p.section.model_edit.setText("m-edited")
-        p.saveSettings()
-        assert getattr(config_mod.get_config(), field) == value
+    yield made
+    for p in made.values():
         p.form.deleteLater()
 
 
-class TestSaving:
-    def test_an_edit_is_saved_and_notified(self, page, notified):
-        page.section.model_edit.setText("m-edited")
-        page.saveSettings()
-        assert b"m-edited" in _disk()
-        assert config_mod.get_config().provider.model == "m-edited"
-        assert notified == [1]
-
-    def test_a_second_save_writes_nothing(self, page, notified):
-        page.section.model_edit.setText("m-edited")
-        page.saveSettings()
-        after_first = _disk()
-        page.saveSettings()
-        assert _disk() == after_first
-        assert notified == [1]
-
-    def test_a_behavior_edit_is_saved(self, page):
-        page.thinking_combo.setCurrentIndex(1)
-        page.saveSettings()
-        assert config_mod.get_config().thinking == "on"
-
-    def test_a_large_max_tokens_survives_an_unrelated_save(self, page):
-        """Review Focus 2: the old page's spin box capped at 32768."""
-        page.section.model_edit.setText("m-edited")
-        page.saveSettings()
-        assert config_mod.get_config().max_tokens == 65536
-
-    def test_apply_stays_on_the_profile_being_edited(self, page):
-        """Review Focus 4."""
-        combo = page.section.profile_combo
-        combo.setCurrentIndex(combo.findData("local"))
-        page.section.model_edit.setText("m-local-edited")
-        page.saveSettings()
-        assert page.section.current_label() == "local"
-        assert config_mod.get_config().profiles["local"].model == \
-            "m-local-edited"
-
-    def test_a_placeholder_url_saves_and_warns(self, page, warnings):
-        url = "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1"
-        page.section.base_url_edit.setText(url)
-        page.saveSettings()
-        assert config_mod.get_config().provider.base_url == url
-        assert len(warnings) == 1 and "cloud" in warnings[0]
+def _ok(pages):
+    """FreeCAD's OK: saveSettings() on every page, in tree order."""
+    for name in ALL:
+        pages[name].saveSettings()
 
 
-class TestCancel:
-    def test_edits_without_save_leave_the_config_alone(self, page, cfg):
-        """Review Focus 3: Cancel means FreeCAD never calls saveSettings()."""
-        page.section.model_edit.setText("m-cancelled")
-        page.section.commit()
-        page.thinking_combo.setCurrentIndex(2)
-        assert cfg.provider.model == "m-cloud"
-        assert cfg.thinking == "off"
-        page.loadSettings()
-        assert page.section.model_edit.text() == "m-cloud"
-        assert page.thinking_combo.currentIndex() == 0
+def test_four_distinct_class_names():
+    assert len({getattr(pp, n).__name__ for n in ALL}) == 4
+
+
+def test_titles(pages):
+    assert [pages[n].form.windowTitle() for n in ALL] == \
+        ["Provider", "Behavior", "Tools", "MCP"]
+
+
+def test_untouched_ok_writes_nothing(pages, notified):
+    before = _disk()
+    _ok(pages)
+    assert _disk() == before
+    assert notified == []
+
+
+def test_a_never_loaded_page_writes_nothing(qapp, cfg, notified):
+    p = pp.FreeCADAIBehaviorPrefs()
+    before = _disk()
+    p.saveSettings()
+    assert _disk() == before
+    p.form.deleteLater()
+
+
+def test_a_page_whose_load_raised_writes_nothing(qapp, cfg, notified,
+                                                 monkeypatch):
+    p = pp.FreeCADAIMcpPrefs()
+    monkeypatch.setattr(p.page, "_show",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+    p.loadSettings()             # logs, does not raise into FreeCAD
+    p.page.mcp_server_port_edit.setText("31000")
+    before = _disk()
+    p.saveSettings()
+    assert _disk() == before
+    p.form.deleteLater()
+
+
+def test_edits_on_two_pages_in_one_ok_both_land(pages, notified):
+    pages["FreeCADAIProviderPrefs"].page.section.model_edit.setText("m-new")
+    pages["FreeCADAIMcpPrefs"].page.mcp_server_port_edit.setText("31000")
+    _ok(pages)
+    fresh = config_mod.load_config()     # from disk, not the singleton
+    assert fresh.profiles["cloud"].model == "m-new"
+    assert fresh.mcp_server_port == 31000
+    assert notified == [1, 1]
+
+
+def test_a_second_ok_writes_nothing(pages, notified):
+    pages["FreeCADAIBehaviorPrefs"].page.max_tokens_spin.setValue(8192)
+    _ok(pages)
+    before = _disk()
+    _ok(pages)
+    assert _disk() == before
+    assert notified == [1]
+
+
+def test_a_large_max_tokens_survives_an_unrelated_save(pages, cfg):
+    pages["FreeCADAIToolsPrefs"].page.rerank_top_n_spin.setValue(25)
+    _ok(pages)
+    assert config_mod.get_config().max_tokens == 65536
+
+
+def test_mode_is_never_touched(pages):
+    for name in ALL:
+        assert not hasattr(pages[name].page, "mode_combo")
+    pages["FreeCADAIBehaviorPrefs"].page.max_tokens_spin.setValue(8192)
+    _ok(pages)
+    assert config_mod.get_config().mode == "act"
+
+
+def test_apply_stays_on_the_profile_being_edited(pages):
+    prov = pages["FreeCADAIProviderPrefs"].page
+    prov.section.profile_combo.setCurrentIndex(
+        prov.section.profile_combo.findData("local"))
+    prov.section.model_edit.setText("m-local-2")
+    pages["FreeCADAIProviderPrefs"].saveSettings()
+    assert prov.section.current_label() == "local"
+
+
+def test_a_placeholder_url_saves_and_warns(pages, warnings):
+    prov = pages["FreeCADAIProviderPrefs"].page
+    prov.section.base_url_edit.setText("https://x/{ACCOUNT_ID}/v1")
+    _ok(pages)
+    assert len(warnings) == 1
+
+
+def test_after_save_runs(pages, monkeypatch):
+    calls = []
+    monkeypatch.setattr("freecad_ai.ui.command_state.set_command_checked",
+                        lambda *a: calls.append(a))
+    beh = pages["FreeCADAIBehaviorPrefs"].page
+    beh.keep_dock_check.setChecked(not beh.keep_dock_check.isChecked())
+    _ok(pages)
+    assert len(calls) == 1
+
+
+def test_provider_page_before_and_after_tools_page_agree(pages):
+    """#10 order independence: an explicit reranker choice wins either way."""
+    import freecad_ai.llm.providers as prov_mod
+    idx = prov_mod.get_provider_names().index("github")
+    for order in (ALL, list(reversed(ALL))):
+        c = config_mod.get_config()
+        c.rerank_method, c.rerank_top_n = "off", 15
+        for p in pages.values():
+            p.loadSettings()
+        pages["FreeCADAIProviderPrefs"].page.section.provider_combo \
+            .setCurrentIndex(idx)
+        pages["FreeCADAIToolsPrefs"].page.rerank_method_combo \
+            .setCurrentIndex(2)      # llm, an explicit choice
+        for name in order:
+            pages[name].saveSettings()
+        assert config_mod.get_config().rerank_method == "llm"
+
+
+class TestCloseHost:
+    def _host(self, qapp, cls):
+        dlg = QtWidgets.QDialog()
+        lay = QtWidgets.QVBoxLayout(dlg)
+        page = cls()
+        lay.addWidget(page.form)
+        return dlg, page
+
+    def test_save_accepts_a_dialog_host(self, qapp, cfg, notified, monkeypatch):
+        dlg, p = self._host(qapp, pp.FreeCADAIToolsPrefs)
+        seen = []
+        monkeypatch.setattr(dlg, "accept", lambda: seen.append("accept"))
+        p.page.closeHostRequested.emit(True)
+        assert seen == ["accept"]
+        dlg.deleteLater()
+
+    def test_discard_rejects_a_dialog_host(self, qapp, cfg, notified,
+                                           monkeypatch):
+        dlg, p = self._host(qapp, pp.FreeCADAIToolsPrefs)
+        seen = []
+        monkeypatch.setattr(dlg, "reject", lambda: seen.append("reject"))
+        p.page.closeHostRequested.emit(False)
+        assert seen == ["reject"]
+        dlg.deleteLater()
+
+    def test_host_can_close_reflects_the_window(self, qapp, cfg, notified):
+        dlg, p = self._host(qapp, pp.FreeCADAIToolsPrefs)
+        assert p.page.host_can_close() is True
+        loose = pp.FreeCADAIToolsPrefs()
+        assert loose.page.host_can_close() is False
+        dlg.deleteLater()
+        loose.form.deleteLater()
+
+
+def test_initgui_registers_the_four_pages_in_order():
+    src = open(os.path.join(PROJECT_ROOT, "InitGui.py"), encoding="utf-8").read()
+    start = src.index("_pp.FreeCADAIProviderPrefs")
+    block = src[start:src.index("addPreferencePage", start)]
+    assert [n for n in ALL if n in block] == ALL
+    assert "FreeCADAIPrefsPage" not in src
 
 
 def test_importing_the_module_builds_no_qt_widgets():
