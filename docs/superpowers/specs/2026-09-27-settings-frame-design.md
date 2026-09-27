@@ -39,6 +39,9 @@ Two implementations of one setting drift apart; #12 and #97 were that bug.
    before OK after a provider switch.
 4. The gear / toolbar / menu button (`FreeCADAI_OpenSettings`) keeps opening
    the dialog.
+5. **Sort the fields while moving them** (see "Regrouping" below): a new
+   *Limits* group, viewport capture into Behavior, the tool-calling switch
+   relabelled, and *Default mode* dropped.
 
 ## Live probe (FreeCAD 1.1.1 AppImage, Xvfb, isolated HOME/XDG dirs)
 
@@ -72,19 +75,54 @@ New package `freecad_ai/ui/settings_pages/`, one module per page, each a
 
 | Page class | Module | Group boxes |
 |---|---|---|
-| `ProviderPage` | `provider_page.py` | `ProviderSection` (LLM Provider + Utility models), Model Parameters (max output tokens, context window, max tool turns, execution timeout, and the per-profile parameter table), Test Connection row, Test Reranker row (moved beside the Reranker utility dropdown) |
-| `BehaviorPage` | `behavior_page.py` | Behavior (enable tools, auto-execute, keep dock, thinking, strip thinking history, preserve reasoning, prompt caching, token-usage logging, **plus Default mode**, new to the dialog), System Prompt (prompt text and reset, viewport capture + resolution, as today) |
+| `ProviderPage` | `provider_page.py` | `ProviderSection` (LLM Provider + Utility models), Model Parameters (the per-profile parameter table only), Test Connection row, Test Reranker row (moved beside the Reranker utility dropdown) |
+| `BehaviorPage` | `behavior_page.py` | **Limits** (new: max output tokens, context window, max tool-loop turns, code execution timeout), Behavior (use tool calling, auto-execute, keep dock, thinking, strip thinking history, preserve reasoning, prompt caching, token-usage logging, viewport capture + capture resolution), System Prompt (prompt text and Reset to Default only) |
 | `ToolsPage` | `tools_page.py` | Tool Reranking (method, top N, pinned tools), User Tools (incl. scan macros), Skills, Hooks, Editor (external editor) |
-| `McpPage` | `mcp_page.py` | MCP Servers: client server list, built-in server host/port, allowed hosts, auth token |
+| `McpPage` | `mcp_page.py` | **MCP Servers** (the servers the workbench connects to: list + Add/Edit/Remove) and **Built-in MCP Server** (new group box: host, port, allowed Host headers, bearer token, the security warning) |
 
-Group boxes move **whole**, with their current contents, so the dialog
-looks the same apart from Default mode and the Test Reranker row. The
-parameter table stays wired to `ProviderSection` through its existing
+Apart from the regrouping below, widgets move with their current labels,
+tooltips and code. The parameter table stays wired to `ProviderSection` through its existing
 `profileShown` / `aboutToCommit` / `presetApplied` / `modelChanged` signals —
 links that now stay within one page. `_TestConnectionThread`, `_TestRerankerThread` and
 `_AddMCPServerDialog` move with the page that uses them.
 
 `ProviderSection` stays in `freecad_ai/ui/provider_section.py`.
+
+### Regrouping (maintainer, 2026-09-27)
+
+Moving every widget anyway, the groups are sorted by what the fields are:
+
+- **Limits group.** `max_tokens`, `context_window`, `max_tool_turns` and
+  `execution_timeout` are global `config.json` fields. Beside the
+  per-profile parameter table they read as per-profile, which they are not.
+  They get their own group box, *Limits*, first on the Behavior page, with
+  their current labels and ranges. Model Parameters keeps only the table and
+  its Add / Remove / Load Defaults buttons.
+- **Viewport capture → Behavior.** Capture mode and resolution sat inside the
+  *System Prompt* group; they decide when screenshots go to the model, not
+  what the prompt says.
+- **Tool-calling switch relabelled.** `enable_tools` is a global switch —
+  chat uses tools only when it is on, the mode is Act, and the active
+  profile supports tools (`chat_widget.py`, `use_tools = cfg.enable_tools
+  and mode == "act" and cfg.supports_tools`). The label "Model supports tool
+  calling (uncheck to fall back to code generation)" describes the profile's
+  capability instead; it becomes **"Use tool calling (uncheck to fall back to
+  code generation)"**. Field and behavior unchanged.
+- **Default mode dropped.** `cfg.mode` is the chat panel's Plan/Act
+  dropdown, saved on every flip (`ChatDockWidget._on_mode_changed`); it is
+  not a default. The #100 Preferences page edited it remotely, and the panel
+  never re-reads it (`_on_config_changed` watches provider, model and MCP
+  only), so with the panel open the edit did not show and the next toggle
+  overwrote it. No page shows it; the panel's dropdown is its only control.
+  `cfg.mode` itself is unchanged.
+- **MCP group split** (proposed in the spec, for the maintainer's review):
+  the client list and the workbench's own server settings are two
+  directions, so two group boxes on the MCP page — *MCP Servers* (unchanged
+  title) and *Built-in MCP Server* (new).
+
+New strings: "Limits", "Use tool calling (uncheck to fall back to code
+generation)", "Built-in MCP Server" — context `SettingsDialog`, untranslated
+until the next `update_translations.sh` run.
 
 ### The page interface
 
@@ -148,7 +186,8 @@ order.
 ### Removed
 
 - The `FreeCADAIPrefs` Behavior group, its translation context, and the
-  "open the full settings dialog" hint.
+  "open the full settings dialog" hint — including its Default mode
+  control, which no page replaces (see Regrouping).
 - `SettingsDialog._on_preset_applied`'s reranker reaction and
   `_rerank_at_factory_defaults` / `_apply_rerank_defaults` in their widget
   form (replaced below).
@@ -239,6 +278,11 @@ Unit (no FreeCAD, offscreen Qt), `env PYTHONPATH= .venv/bin/pytest tests/unit
 - #10: provider page before tools page and after give the same config;
   an explicit non-default reranker survives.
 - Dialog geometry (#78) test still passes with the pages inside.
+- Regrouping: the Limits fields live on `BehaviorPage` and load / apply
+  `max_tokens` etc.; the viewport combos live in the Behavior group; no page
+  has a mode control and saving any page leaves `cfg.mode` as it was; the
+  tool-calling checkbox carries the new label; the MCP page has both group
+  boxes.
 
 Live probe (FreeCAD 1.1.1, Xvfb, isolated dirs, the #99 harness):
 
@@ -252,7 +296,10 @@ Live probe (FreeCAD 1.1.1, Xvfb, isolated dirs, the #99 harness):
 ## Docs
 
 - CHANGELOG (`### Changed`): Preferences shows every setting in four pages;
-  the dialog writes only edited fields and gains Default mode; Test Reranker moved; #10 defaults
+  the dialog writes only edited fields; fields regrouped (Limits, viewport
+  capture, split MCP group); tool-calling switch relabelled; Default mode
+  removed from Preferences (the chat panel's Plan/Act dropdown is the
+  control); Test Reranker moved; #10 defaults
   apply on save; unknown providers are labelled as such.
 - README Configuration bullets; wiki Configuration "FreeCAD Preferences
   Page" section, Home / FAQ where they mention the hint or the one page.
