@@ -188,6 +188,11 @@ key, so one Anthropic key can serve several Anthropic profiles. Those defaults
 live in the `provider_keys` object in `config.json` and are set by hand — the
 Settings dialog edits a profile's own key, and clearing that field clears it.
 
+A profile can also carry its own limits: a `max_tokens` row in its Model
+Parameters table sets its output cap, and **Compact above** sets how large a
+conversation on it may grow before older messages are summarised. Both fall
+back to the Behavior page's values when left unset.
+
 Beyond the active profile chat uses, four utility jobs each pick their own
 profile from a dropdown in Settings: context compaction, skill evaluation,
 tool optimisation, and tool reranking. Left on **inherit**, a utility runs on
