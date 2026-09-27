@@ -69,7 +69,7 @@ def _make_fake_section(base_url="http://gateway.example/v1", model="my-model"):
     return fake
 
 
-def _make_fake_dialog(model="my-model", profile=None, rerank_untouched=False):
+def _make_fake_dialog(model="my-model", profile=None):
     """Build a fake dialog with just the attributes _on_preset_applied touches."""
     section = MagicMock()
     section.model_edit.text.return_value = model
@@ -78,8 +78,6 @@ def _make_fake_dialog(model="my-model", profile=None, rerank_untouched=False):
         provider_section=section,
         _cfg=AppConfig(),
         _load_model_params_table=MagicMock(),
-        _rerank_at_factory_defaults=MagicMock(return_value=rerank_untouched),
-        _apply_rerank_defaults=MagicMock(),
     )
 
 
@@ -146,18 +144,3 @@ def test_params_table_reload_gets_the_working_copy_profile():
     args, kwargs = fake._load_model_params_table.call_args
     assert args[1] is fake._cfg
     assert args[2] is profile
-
-
-def test_a_touched_reranker_keeps_the_users_choice():
-    """default_rerank (#10) applies only while the reranker UI is at its
-    factory defaults."""
-    fake = _make_fake_dialog(rerank_untouched=False)
-    SettingsDialog._on_preset_applied(
-        cast(SettingsDialog, fake), PROVIDER_PRESETS["github"])
-    fake._apply_rerank_defaults.assert_not_called()
-
-    fake = _make_fake_dialog(rerank_untouched=True)
-    SettingsDialog._on_preset_applied(
-        cast(SettingsDialog, fake), PROVIDER_PRESETS["github"])
-    fake._apply_rerank_defaults.assert_called_once_with(
-        PROVIDER_PRESETS["github"]["default_rerank"])

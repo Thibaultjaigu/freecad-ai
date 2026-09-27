@@ -344,3 +344,66 @@ class TestSignals:
         section.model_edit.setText("  other-model ")
         section.model_edit.editingFinished.emit()
         assert seen == [("other-model",)]
+
+
+class TestRerankDefaults:
+    """#10 at save time: a switch to a preset with default_rerank sets the
+    reranker only while the live config is still at factory defaults."""
+
+    GH = PROVIDER_PRESETS["github"]["default_rerank"]
+
+    def _switch_to_github(self, section):
+        section.load(_cfg())
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("github"))
+
+    def test_untouched_reranker_takes_the_preset(self, section):
+        self._switch_to_github(section)
+        out = AppConfig()
+        section.apply_to(out)
+        assert out.rerank_method == self.GH["method"]
+        assert out.rerank_top_n == self.GH["top_n"]
+
+    def test_an_explicit_choice_survives(self, section):
+        self._switch_to_github(section)
+        out = AppConfig()
+        out.rerank_method = "llm"
+        section.apply_to(out)
+        assert out.rerank_method == "llm"
+        assert out.rerank_top_n == 15
+
+    def test_a_changed_top_n_alone_counts_as_explicit(self, section):
+        self._switch_to_github(section)
+        out = AppConfig()
+        out.rerank_top_n = 20
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 20)
+
+    def test_no_switch_no_change(self, section):
+        section.load(_cfg())
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_last_switch_wins(self, section):
+        self._switch_to_github(section)
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("ollama"))
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_load_clears_the_record(self, section):
+        self._switch_to_github(section)
+        section.load(_cfg())
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)
+
+    def test_apply_consumes_the_record(self, section):
+        """A second Apply after the user set 'off' again must not re-apply."""
+        self._switch_to_github(section)
+        section.apply_to(AppConfig())
+        out = AppConfig()
+        section.apply_to(out)
+        assert (out.rerank_method, out.rerank_top_n) == ("off", 15)

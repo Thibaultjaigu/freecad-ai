@@ -87,6 +87,7 @@ class ProviderSection(QWidget):
         self._utility_profiles = {}
         self._current_profile_label = None
         self._baseline = None
+        self._pending_rerank = None
         self._build_ui()
 
     def _build_ui(self):
@@ -224,6 +225,7 @@ class ProviderSection(QWidget):
         the user later cancels. Shows ``label`` when it names a profile,
         else the active one.
         """
+        self._pending_rerank = None
         self._profiles = copy.deepcopy(cfg.profiles)
         self._active_profile = cfg.active_profile
         self._utility_profiles = dict(cfg.utility_profiles)
@@ -241,6 +243,17 @@ class ProviderSection(QWidget):
         cfg.active_profile = self._active_profile
         cfg.utility_profiles = self._collect_utility_profiles(
             self._utility_profiles)
+        # Factory defaults = off + 15. Checked on the *live* config, so an
+        # explicit reranker choice saved by the Tools page (in either order)
+        # is never overwritten; an explicit off/15 is indistinguishable, as
+        # it was when this check read the widgets.
+        pending, self._pending_rerank = self._pending_rerank, None
+        if (pending and cfg.rerank_method == "off"
+                and cfg.rerank_top_n == 15):
+            if pending.get("method") in ("off", "keyword", "llm"):
+                cfg.rerank_method = pending["method"]
+            if "top_n" in pending:
+                cfg.rerank_top_n = int(pending["top_n"])
 
     def commit(self):
         """Write the visible fields into the profile being edited."""
@@ -652,6 +665,10 @@ class ProviderSection(QWidget):
             return
         self._drop_unknown_item()
         preset = PROVIDER_PRESETS.get(names[index], {})
+        # #10: remember the preset's reranker recommendation; apply_to
+        # decides at save time whether the reranker is still untouched.
+        # Every user switch overwrites it, so the last switch wins.
+        self._pending_rerank = dict(preset.get("default_rerank") or {}) or None
         # Only overwrite when the preset has a concrete value. The
         # "custom" preset ships empty strings — wiping the user's
         # gateway/model on every switch-to-custom is the second half
@@ -663,8 +680,8 @@ class ProviderSection(QWidget):
         new_model = preset.get("default_model", "")
         if new_model:
             self.model_edit.setText(new_model)
-        # The dialog reloads its params table and applies default_rerank
-        # (#10) here, before the commit below writes the table back.
+        # The dialog reloads its params table here, before the commit
+        # below writes the table back.
         self.presetApplied.emit(preset)
         # A vendor switch is an explicit "point this profile
         # elsewhere", so record it. Only a user-driven change reaches

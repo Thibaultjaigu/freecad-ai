@@ -78,13 +78,22 @@ def test_a_b_a_keeps_each_profiles_own_params(dialog):
     assert dialog._read_model_params_table() == {"temperature": 0.7}
 
 
-def test_a_provider_switch_applies_default_rerank_when_untouched(dialog):
+def test_a_provider_switch_applies_default_rerank_on_save(dialog, cfg, monkeypatch):
+    """#10 at save time: the widgets don't flip before OK any more (Decision
+    3's accepted cost) — only get_config() after a real save shows it."""
+    import freecad_ai.ui.settings_dialog as sd
+    import freecad_ai.ui.command_state as command_state
     defaults = PROVIDER_PRESETS["github"]["default_rerank"]
     dialog.provider_section.provider_combo.setCurrentIndex(
         get_provider_names().index("github"))
-    assert dialog.rerank_method_combo.currentIndex() == \
-        SettingsDialog._RERANK_METHOD_INDEX[defaults["method"]]
-    assert dialog.rerank_top_n_spin.value() == int(defaults["top_n"])
+    monkeypatch.setattr(sd, "save_current_config", lambda: None)
+    monkeypatch.setattr(sd, "notify_config_changed", lambda: None)
+    monkeypatch.setattr(command_state, "set_command_checked",
+                        lambda *a, **k: None)
+    dialog._save()
+    from freecad_ai.config import get_config
+    assert get_config().rerank_method == defaults["method"]
+    assert get_config().rerank_top_n == defaults["top_n"]
 
 
 def test_a_model_edit_swaps_the_table(dialog):

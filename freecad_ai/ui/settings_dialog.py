@@ -959,7 +959,7 @@ class SettingsDialog(QDialog):
         prof.params = self._read_model_params_table()
 
     def _on_preset_applied(self, preset):
-        """A user provider switch: reload the table, maybe apply #10.
+        """A user provider switch: reload the params table from the working copy.
 
         The working-copy profile, not the singleton: a vendor switch keeps
         the parameters this profile already states, and falls back to the
@@ -968,29 +968,6 @@ class SettingsDialog(QDialog):
         section = self.provider_section
         self._load_model_params_table(
             section.model_edit.text(), self._cfg, section.current_profile())
-        # Apply provider-recommended reranker settings only when the
-        # reranker UI is still at its factory default (off + top_n 15), so
-        # an explicit user choice — even "off" — survives a provider
-        # switch. Used by the github preset (issue #10).
-        rerank_defaults = preset.get("default_rerank", {})
-        if rerank_defaults and self._rerank_at_factory_defaults():
-            self._apply_rerank_defaults(rerank_defaults)
-
-    def _rerank_at_factory_defaults(self) -> bool:
-        """True if the rerank UI matches AppConfig's factory defaults."""
-        return (self.rerank_method_combo.currentIndex() == 0
-                and self.rerank_top_n_spin.value() == 15)
-
-    _RERANK_METHOD_INDEX = {"off": 0, "keyword": 1, "llm": 2}
-
-    def _apply_rerank_defaults(self, defaults: dict):
-        """Push a preset's recommended reranker settings into the UI."""
-        method = defaults.get("method")
-        if method in self._RERANK_METHOD_INDEX:
-            self.rerank_method_combo.setCurrentIndex(
-                self._RERANK_METHOD_INDEX[method])
-        if "top_n" in defaults:
-            self.rerank_top_n_spin.setValue(int(defaults["top_n"]))
 
     # ── Model Parameters table helpers ─────────────────────────
 
@@ -1192,15 +1169,14 @@ class SettingsDialog(QDialog):
         # Profile edits (add/rename/delete/field changes) have lived in the
         # section's working copy since _load_from_config. OK is the only
         # point where they land in the real config — commit the visible
-        # widgets into the currently-shown profile first, then write the
-        # whole working copy back. cfg.provider (a property resolving
-        # profiles[active_profile]) then reads correctly for everything
-        # below, with no separate provider.* writes needed.
+        # widgets into the currently-shown profile first. The working copy
+        # itself is written back near the end, via section.apply_to(cfg),
+        # after the rerank widgets below so its #10 factory-default check
+        # sees this save's own values.
         section = self.provider_section
         section.commit()
         if not self._confirm_incomplete_profiles(section.profiles()):
             return
-        section.apply_to(cfg)
 
         cfg.max_tokens = self.max_tokens_spin.value()
         cfg.context_window = self.context_window_spin.value()
@@ -1265,6 +1241,10 @@ class SettingsDialog(QDialog):
         cfg.rerank_pinned_tools = [
             s.strip() for s in pinned_text.split(",") if s.strip()
         ] if pinned_text else []
+
+        # After the widget writes above, so the section's #10 factory-
+        # default check (in apply_to) sees this save's own rerank values.
+        section.apply_to(cfg)
 
         save_current_config()
 
