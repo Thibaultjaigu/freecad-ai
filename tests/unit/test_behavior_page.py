@@ -143,3 +143,21 @@ def test_after_save_sets_the_keep_dock_checkmark(page, monkeypatch):
     cfg.keep_dock_on_workbench_switch = True
     page.after_save(cfg)
     assert calls == [("FreeCADAI_ToggleKeepDock", True)]
+
+
+def _row_label(widget):
+    form = widget.parentWidget().layout()
+    return form.labelForField(widget).text()
+
+
+def test_context_window_is_labelled_compact_above(page):
+    assert _row_label(page.context_window_spin) == "Compact above:"
+    tip = page.context_window_spin.toolTip()
+    assert "compacted" in tip and "Provider page" in tip
+
+
+def test_max_output_tokens_tooltip_mentions_the_row(page):
+    assert _row_label(page.max_tokens_spin) == "Max Output Tokens:"
+    tip = page.max_tokens_spin.toolTip()
+    assert "max_tokens row" in tip
+    assert "determined by the model" not in tip
