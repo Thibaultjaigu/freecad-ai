@@ -43,21 +43,24 @@ except ImportError:
 from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
 
 # Which shot shows which group, from the captions in Configuration.md.
-# A group in two shots means both have to be retaken.
+# A group in two shots means both have to be retaken. Retaken 2026-09-27
+# for #101's four-page split: the three shots are equal-sized scroll tiles
+# over the one scrollable dialog, so a group whose box straddles a tile
+# boundary lands in both neighbouring shots.
 WIKI_IMAGE = {
     "LLM Provider": ("settings-dialog.png",),
     "Utility models": ("settings-dialog.png",),
     "Model Parameters": ("settings-dialog.png",),
-    "Limits": ("settings-dialog.png",),
-    "System Prompt": ("settings-dialog.png",),
-    "Behavior": ("settings-dialog-2.png",),
+    "Limits": ("settings-dialog.png", "settings-dialog-2.png"),
+    "Behavior": ("settings-dialog.png", "settings-dialog-2.png"),
+    "System Prompt": ("settings-dialog-2.png",),
     "Tool Reranking": ("settings-dialog-2.png",),
-    "MCP Servers": ("settings-dialog-2.png", "settings-dialog-3.png"),
-    "Built-in MCP Server": ("settings-dialog-2.png", "settings-dialog-3.png"),
-    "Editor": ("settings-dialog-2.png", "settings-dialog-3.png"),
     "User Tools": ("settings-dialog-2.png", "settings-dialog-3.png"),
-    "Skills": ("settings-dialog-3.png",),
+    "Skills": ("settings-dialog-2.png", "settings-dialog-3.png"),
     "Hooks": ("settings-dialog-3.png",),
+    "Editor": ("settings-dialog-3.png",),
+    "MCP Servers": ("settings-dialog-3.png",),
+    "Built-in MCP Server": ("settings-dialog-3.png",),
 }
 
 # Checkbox labels are spelled out because they are what a reader compares
@@ -69,12 +72,11 @@ RECORDED = {
         "combos": 2, "spins": 0, "fields": 3, "buttons": 4},
     "Utility models": {
         # buttons: 1, not 0 -- Test Reranker moved into this group, beside
-        # the Reranker dropdown it tests, in #101's Task 7. Retake
-        # settings-dialog.png.
+        # the Reranker dropdown it tests, in #101's Task 7.
         "checkboxes": (), "combos": 4, "spins": 0, "fields": 0, "buttons": 1},
     "Model Parameters": {
         # spins: 0, not 4 -- the four spin boxes moved into BehaviorPage's
-        # own Limits group in #101's Task 6. Retake settings-dialog.png.
+        # own Limits group in #101's Task 6.
         "checkboxes": (), "combos": 0, "spins": 0, "fields": 0, "buttons": 3},
     "Limits": {
         "checkboxes": (), "combos": 0, "spins": 4, "fields": 0, "buttons": 0},
@@ -98,7 +100,7 @@ RECORDED = {
     "Tool Reranking": {
         # buttons: 0, not 1 -- Test Reranker moved outside the group box
         # in #101's Task 5 (ToolsPage), directly under the page instead of
-        # inside this group's own layout. Retake settings-dialog-2.png.
+        # inside this group's own layout.
         "checkboxes": (), "combos": 1, "spins": 1, "fields": 1, "buttons": 0},
     "MCP Servers": {
         "checkboxes": (), "combos": 0, "spins": 0, "fields": 0, "buttons": 3},
