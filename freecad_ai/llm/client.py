@@ -1128,6 +1128,37 @@ def resolve_params(cfg, profile) -> dict:
     return dict(profile.params)
 
 
+def take_max_tokens_row(params: dict, label: str) -> int | None:
+    """Pop a profile's ``max_tokens`` params row; return it if usable.
+
+    The row is the per-profile output cap (#103). It never travels as a
+    request param — ``max_tokens`` is reserved in both request builders —
+    so it is removed from ``params`` whatever its value. A value that is
+    not a positive integer falls back to the caller's default, with a
+    warning: silently ignoring it would leave the user no way to tell why
+    their row did nothing.
+    """
+    if "max_tokens" not in params:
+        return None
+    raw = params.pop("max_tokens")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        return raw
+    if isinstance(raw, float) and raw.is_integer() and raw > 0:
+        return int(raw)
+    logger.warning(
+        'max_tokens row %s in profile "%s" ignored — not a positive integer',
+        json.dumps(raw, default=str), label)
+    return None
+
+
+def _profile_label(cfg, profile) -> str:
+    """The key ``profile`` is stored under in ``cfg.profiles``."""
+    for label, candidate in cfg.profiles.items():
+        if candidate is profile:
+            return label
+    return cfg.active_profile
+
+
 def create_client(cfg=None, utility: str | None = None, *,
                   max_tokens: int | None = None,
                   temperature: float | None = None,
@@ -1139,7 +1170,8 @@ def create_client(cfg=None, utility: str | None = None, *,
     resolved profile. Job settings (max_tokens, temperature, thinking)
     come from the config unless the call site overrides them — the
     reranker wants 1024 tokens and no thinking whichever profile it runs
-    on.
+    on. A valid ``max_tokens`` row in the profile's params sits between
+    the two: it beats the config, never a call-site override (#103).
 
     An empty ``api_key`` on the profile falls back to the vendor-wide
     default in ``cfg.provider_keys``, so one Anthropic secret serves every
@@ -1152,13 +1184,16 @@ def create_client(cfg=None, utility: str | None = None, *,
     profile = resolve_profile(cfg, utility)
 
     params = resolve_params(cfg, profile)
+    row_cap = take_max_tokens_row(params, _profile_label(cfg, profile))
+    if max_tokens is None:
+        max_tokens = row_cap if row_cap is not None else cfg.max_tokens
 
     return LLMClient(
         provider_name=profile.name,
         base_url=profile.base_url,
         api_key=profile.api_key or cfg.provider_keys.get(profile.name, ""),
         model=profile.model,
-        max_tokens=cfg.max_tokens if max_tokens is None else max_tokens,
+        max_tokens=max_tokens,
         temperature=cfg.temperature if temperature is None else temperature,
         thinking=cfg.thinking if thinking is None else thinking,
         model_params=params,
