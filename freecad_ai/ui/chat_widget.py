@@ -1580,7 +1580,7 @@ class ChatDockWidget(QDockWidget):
         worker.detach()
         # A running QThread must never be destroyed: hold it until it ends.
         self._detached_workers.append(worker)
-        worker.finished.connect(lambda: self._release_detached(worker))
+        worker.finished.connect(self._on_detached_finished)
         if not worker.isRunning():   # ended between the check and the connect
             self._release_detached(worker)
         self._store_tool_results(worker._full_response)
@@ -1594,6 +1594,9 @@ class ChatDockWidget(QDockWidget):
         cursor.insertHtml("</div></div>")
         self._append_html(render_message(
             "system", translate("ChatDockWidget", "⏹ Stopped")))
+
+    def _on_detached_finished(self):
+        self._release_detached(self.sender())
 
     def _release_detached(self, worker):
         if worker in self._detached_workers:
@@ -2221,22 +2224,23 @@ class ChatDockWidget(QDockWidget):
         self._turn_notes = []
         self._turn_start = len(conversation.messages)
         self._turn_open = True
-        worker = _LLMWorker(conversation, system_prompt, parent=self,
-                            **worker_kwargs)
-        self._worker = worker
-
-        # Qt still delivers signals queued before a disconnect(), so each
-        # slot runs only while this worker is the current one: a detached
-        # or replaced worker's last signals change nothing (#104).
-        def from_current(slot):
-            def call(*args):
-                if worker is self._worker:
-                    return slot(*args)
-            return call
-
+        self._worker = _LLMWorker(conversation, system_prompt, parent=self,
+                                  **worker_kwargs)
+        # Bound dock methods only: a QObject receiver gets its slots queued
+        # onto the GUI thread under PySide2 and PySide6 alike. Each slot
+        # checks _from_current_worker() itself.
         for signal, slot in self._WORKER_SLOTS:
-            getattr(worker, signal).connect(from_current(getattr(self, slot)))
-        worker.start()
+            getattr(self._worker, signal).connect(getattr(self, slot))
+        self._worker.start()
+
+    def _from_current_worker(self) -> bool:
+        """Whether the signal being handled comes from the current worker.
+
+        Qt still delivers signals queued before a disconnect(), so a
+        detached or replaced worker's last signals must change nothing
+        (#104). A direct call (no sender) is always handled."""
+        sender = self.sender()
+        return sender is None or sender is self._worker
 
     def _save_session_log(self):
         """Save the current session log as JSON for debugging."""
@@ -2333,6 +2337,8 @@ class ChatDockWidget(QDockWidget):
     @Slot(str)
     def _on_thinking(self, chunk):
         """Handle a thinking/reasoning delta — render dimmed."""
+        if not self._from_current_worker():
+            return
         import html as html_mod
         if not self._in_thinking:
             self._in_thinking = True
@@ -2360,6 +2366,8 @@ class ChatDockWidget(QDockWidget):
     @Slot(str)
     def _on_token(self, chunk):
         """Handle a streamed token — append to the display."""
+        if not self._from_current_worker():
+            return
         import html as html_mod
 
         # Close thinking block if transitioning from thinking to regular content
@@ -2431,6 +2439,8 @@ class ChatDockWidget(QDockWidget):
     @Slot(str)
     def _on_response_finished(self, full_response):
         """Handle completion of LLM response."""
+        if not self._from_current_worker():
+            return
         self._turn_open = False
         self._set_loading(False)
 
@@ -2575,6 +2585,8 @@ class ChatDockWidget(QDockWidget):
         Preserves any tool results from earlier turns, then appends the error
         without re-rendering (to keep the streaming HTML intact).
         """
+        if not self._from_current_worker():
+            return
         self._turn_open = False
         self._set_loading(False)
 
@@ -2623,17 +2635,23 @@ class ChatDockWidget(QDockWidget):
     @Slot(str, str)
     def _on_tool_call_started(self, tool_name, call_id):
         """Render tool call start in the chat."""
+        if not self._from_current_worker():
+            return
         self._append_html(render_tool_call(tool_name, call_id, started=True))
 
     @Slot(str, str, bool, str)
     def _on_tool_call_finished(self, tool_name, call_id, success, output):
         """Render tool call result in the chat."""
+        if not self._from_current_worker():
+            return
         self._append_html(render_tool_call(
             tool_name, call_id, started=False, success=success, output=output
         ))
 
     def _on_vision_note(self, message: str):
         """Show a subtle note when images are auto-described."""
+        if not self._from_current_worker():
+            return
         self._append_html(
             f'<div style="color: #888; font-size: 9pt; margin: 2px 12px;">'
             f'{message}</div>'
@@ -2643,12 +2661,16 @@ class ChatDockWidget(QDockWidget):
         """Show which profile answered after a failover (#104). Display
         only: kept on the turn's reply for the re-render, never sent to a
         model."""
+        if not self._from_current_worker():
+            return
         self._turn_notes.append(text)
         self._append_html(_render_note(text))
 
     @Slot(str, str)
     def _execute_tool_call(self, tool_name, arguments_json):
         """Execute a tool call on the main thread. Connected to worker's tool_exec_requested signal."""
+        if not self._from_current_worker():
+            return
         if not self._tool_registry:
             result = {"success": False, "output": "", "error": "No tool registry"}
         else:

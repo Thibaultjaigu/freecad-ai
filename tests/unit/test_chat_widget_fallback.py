@@ -26,6 +26,14 @@ def _running_worker():
     return worker
 
 
+def _as_slot_host(fake, sender=None):
+    """Give a fake the dock's current-worker guard, as a real slot sees it:
+    ``sender`` is the emitting worker, None for a direct call."""
+    fake.sender = lambda: sender
+    fake._from_current_worker = lambda: W._from_current_worker(fake)
+    return fake
+
+
 def _detach_fake(worker):
     fake = SimpleNamespace(
         _worker=worker, _detached_workers=[],
@@ -34,6 +42,8 @@ def _detach_fake(worker):
         _append_html=MagicMock(), _WORKER_SLOTS=W._WORKER_SLOTS,
         _turn_open=True)
     fake._release_detached = lambda w: W._release_detached(fake, w)
+    fake._on_detached_finished = lambda: W._on_detached_finished(fake)
+    fake.sender = lambda: worker
     return fake
 
 
@@ -88,7 +98,8 @@ def test_a_detached_worker_is_released_when_it_ends():
 
 
 def test_the_fallback_note_is_escaped():
-    fake = SimpleNamespace(_append_html=MagicMock(), _turn_notes=[])
+    fake = _as_slot_host(SimpleNamespace(_append_html=MagicMock(),
+                                         _turn_notes=[]))
     W._on_fallback_note(fake, "⚠ a<b couldn't be reached — answered by c")
     html = fake._append_html.call_args[0][0]
     assert "a&lt;b" in html
@@ -182,11 +193,11 @@ NOTE = "⚠ a<b couldn't be reached — answered by c"
 
 
 def _note_fake(conv):
-    return SimpleNamespace(
+    return _as_slot_host(SimpleNamespace(
         conversation=conv, _worker=SimpleNamespace(_tool_results=[]),
         _turn_notes=[], _turn_start=len(conv.messages),
         _append_html=MagicMock(), chat_display=MagicMock(),
-        mode_combo=SimpleNamespace(currentIndex=lambda: 1))
+        mode_combo=SimpleNamespace(currentIndex=lambda: 1)))
 
 
 def _rendered(fake):
@@ -289,20 +300,90 @@ def _started(monkeypatch):
     return fake, fake._worker
 
 
-def test_a_slot_runs_for_the_current_worker(monkeypatch):
+def test_start_worker_connects_the_dock_slots_themselves(monkeypatch):
+    """Bound dock methods, as before #104: a QObject receiver gets its
+    slots queued onto the GUI thread under PySide2 and PySide6 alike."""
     fake, worker = _started(monkeypatch)
-    worker.slots["token_received"]("hi")
-    fake._on_token.assert_called_once_with("hi")
-
-
-@pytest.mark.parametrize("successor", [None, "newer"])
-def test_a_slot_queued_by_an_old_worker_changes_nothing(monkeypatch,
-                                                         successor):
-    fake, worker = _started(monkeypatch)
-    fake._worker = None if successor is None else _running_worker()
     for signal, slot in W._WORKER_SLOTS:
-        worker.slots[signal]("x")
-        getattr(fake, slot).assert_not_called()
+        assert worker.slots[signal] is getattr(fake, slot)
+
+
+def test_a_signal_from_the_current_worker_is_handled():
+    worker = object()
+    fake = _as_slot_host(SimpleNamespace(_worker=worker,
+                                         _append_html=MagicMock()), worker)
+    W._on_vision_note(fake, "seen")
+    fake._append_html.assert_called_once()
+
+
+@pytest.mark.parametrize("current", [None, "newer"])
+@pytest.mark.parametrize("signal,slot", W._WORKER_SLOTS)
+def test_a_signal_from_an_old_worker_changes_nothing(signal, slot, current):
+    """The fake holds only the guard's inputs: a slot that went past the
+    guard would hit an AttributeError."""
+    old = object()
+    fake = _as_slot_host(SimpleNamespace(
+        _worker=None if current is None else object()), old)
+    args = {"tool_call_finished": ("t", "c", True, "o"),
+            "tool_call_started": ("t", "c"),
+            "tool_exec_requested": ("t", "{}")}.get(signal, ("x",))
+    assert getattr(W, slot)(fake, *args) is None
+
+
+def test_a_real_queued_signal_from_a_stale_thread_is_dropped():
+    """Real QThread emitter, real QObject receiver, real queued delivery:
+    sender() names the thread, and the guard drops it once replaced."""
+    import threading
+    from freecad_ai.ui.compat import QtCore, QtWidgets
+    _app = (QtWidgets.QApplication.instance()  # noqa: F841 -- keep alive
+            or QtWidgets.QApplication([]))
+
+    class _Thread(QtCore.QThread):
+        vision_note = QtCore.Signal(str)
+
+        def run(self):
+            self.vision_note.emit("hello")
+
+    class _Dock(QtCore.QObject):
+        _from_current_worker = W._from_current_worker
+
+        def _on_vision_note(self, message):
+            # Delegate: PySide skips a foreign function set as a class
+            # attribute, so the slot must be defined here.
+            self.delivered += 1
+            return W._on_vision_note(self, message)
+
+        def __init__(self):
+            super().__init__()
+            self.seen = []
+            self.delivered = 0
+
+        def _append_html(self, html):
+            self.seen.append((html, threading.current_thread()
+                              is threading.main_thread()))
+
+    for replaced in (False, True):
+        dock, thread = _Dock(), _Thread()
+        dock._worker = None if replaced else thread
+        thread.vision_note.connect(dock._on_vision_note)
+        thread.start()
+        thread.wait(5000)
+        # Deliver the queued call now (processEvents alone may not, on a
+        # real display platform).
+        QtCore.QCoreApplication.sendPostedEvents()
+        assert dock.delivered == 1, "the queued call must really arrive"
+        if replaced:
+            assert dock.seen == []
+        else:
+            [(html, on_main)] = dock.seen
+            assert "hello" in html and on_main
+
+
+def test_a_direct_call_is_handled():
+    fake = _as_slot_host(SimpleNamespace(_worker=object(),
+                                         _append_html=MagicMock()))
+    W._on_vision_note(fake, "seen")
+    fake._append_html.assert_called_once()
 
 
 def test_starting_a_worker_opens_the_turn(monkeypatch):
@@ -312,24 +393,24 @@ def test_starting_a_worker_opens_the_turn(monkeypatch):
 
 
 def test_an_error_closes_the_turn():
-    fake = SimpleNamespace(
+    fake = _as_slot_host(SimpleNamespace(
         _turn_open=True, _set_loading=MagicMock(), chat_display=MagicMock(),
         _store_tool_results=MagicMock(), conversation=Conversation(),
-        _worker=SimpleNamespace(_tool_results=[]), _append_html=MagicMock())
+        _worker=SimpleNamespace(_tool_results=[]), _append_html=MagicMock()))
     W._on_error(fake, "boom")
     assert fake._turn_open is False
 
 
 def test_a_finished_response_closes_the_turn(monkeypatch):
     monkeypatch.setattr("freecad_ai.hooks.fire_hook", lambda *a, **k: None)
-    fake = SimpleNamespace(
+    fake = _as_slot_host(SimpleNamespace(
         _turn_open=True, _set_loading=MagicMock(), chat_display=MagicMock(),
         _store_tool_results=MagicMock(), conversation=MagicMock(),
         _update_token_count=MagicMock(), _rerender_chat=MagicMock(),
         mode_combo=SimpleNamespace(currentIndex=lambda: 1),
         _capture_mode_override="off", _append_html=MagicMock(),
         _worker=SimpleNamespace(_tool_results=[], _response_truncated=False,
-                                _tool_timeline=[]))
+                                _tool_timeline=[])))
     W._on_response_finished(fake, "")
     assert fake._turn_open is False
 
