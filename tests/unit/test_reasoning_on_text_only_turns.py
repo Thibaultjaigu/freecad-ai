@@ -47,6 +47,7 @@ except ImportError:
 from freecad_ai.core.conversation import Conversation  # noqa: E402
 from freecad_ai.llm.client import LLMClient  # noqa: E402
 from freecad_ai.ui import chat_widget as cw  # noqa: E402
+from tests.unit._worker_harness import OneClientWalker, add_seams  # noqa: E402
 
 THINKING = "the user asked how, not for it to be built"
 ANSWER = "I would pocket it from the top face."
@@ -80,9 +81,7 @@ class _Worker:
         self._strip_thinking = strip
         self._optimize_caching = optimize
         self._preserve_reasoning = preserve
-        self.messages = []
         self.system_prompt = ""
-        self.tools = None
         self.registry = None
         self._full_response = ""
         self._thinking_text = ""
@@ -109,6 +108,7 @@ class _Worker:
             lambda text: setattr(outer, "finished_with", text))
         self.tool_call_started = _Signal(lambda *a: None)
         self.tool_call_finished = _Signal(lambda *a: None)
+        add_seams(self)
 
     def isInterruptionRequested(self):
         return False
@@ -129,7 +129,7 @@ def _openai_sse(reasoning=None, content=ANSWER, finish="stop"):
 
 def _run_simple(worker, client, chunks):
     with patch.object(client, "_http_stream", return_value=iter(chunks)):
-        cw._LLMWorker._simple_stream(worker, client)
+        cw._LLMWorker._simple_stream(worker, OneClientWalker(client))
 
 
 class TestAPlanReplyKeepsItsReasoning:
@@ -226,7 +226,7 @@ class TestThePlanRequestIsUnchanged:
             return iter(_openai_sse(reasoning=THINKING))
 
         with patch.object(client, "_http_stream", side_effect=capture):
-            cw._LLMWorker._simple_stream(worker, client)
+            cw._LLMWorker._simple_stream(worker, OneClientWalker(client))
         return seen["payload"]
 
     def test_it_sends_no_tools(self):
@@ -248,7 +248,7 @@ class TestTheFinalAnswerOfAnActRunKeepsItsReasoning:
 
     def _run_loop(self, worker, client, chunks):
         with patch.object(client, "_http_stream", return_value=iter(chunks)):
-            cw._LLMWorker._tool_loop(worker, client)
+            cw._LLMWorker._tool_loop(worker, OneClientWalker(client))
 
     def test_a_turn_that_calls_no_tools_carries_its_reasoning_out(self):
         worker = _Worker()

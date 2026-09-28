@@ -21,9 +21,17 @@ Like the rest of #47 it rides on ``optimize_prompt_caching``.
 
 import pytest
 
-from freecad_ai.config import AppConfig
-from freecad_ai.core.conversation import Conversation
-from freecad_ai.llm.client import LLMClient, create_client
+try:
+    import PySide6  # noqa: F401
+except ImportError:
+    try:
+        import PySide2  # noqa: F401
+    except ImportError:
+        pytest.skip("PySide6/PySide2 not available", allow_module_level=True)
+
+from freecad_ai.config import AppConfig  # noqa: E402
+from freecad_ai.core.conversation import Conversation  # noqa: E402
+from freecad_ai.llm.client import LLMClient, create_client  # noqa: E402
 
 
 def _client(provider="moonshot", **kw):
@@ -126,47 +134,28 @@ class TestSomethingActuallySuppliesIt:
     """The half that is easy to forget: a client field with no caller is a
     silent no-op, and this one would look fine in every test above."""
 
-    def _run(self, conversation, monkeypatch):
+    def _run(self, conversation, monkeypatch, tmp_config_dir):
         from freecad_ai.ui import chat_widget
 
         seen = {}
 
-        def fake_create(*, cache_key=""):
+        def fake_create(cfg, *, profile=None, cache_key="", **k):
             seen["cache_key"] = cache_key
             return _client(prompt_caching=True, cache_key=cache_key)
 
-        monkeypatch.setattr(
-            "freecad_ai.llm.client.create_client_from_config", fake_create)
-        monkeypatch.setattr(
-            "freecad_ai.llm.client.should_strip_thinking", lambda *a: False)
-
-        class _Worker:
-            conversation = None
-            describe_fn = None
-            tools = []
-            api_style = "openai"
-
-            class error_occurred:
-                @staticmethod
-                def emit(msg):
-                    raise AssertionError("run() failed: {}".format(msg))
-
-            def _simple_stream(self, client):
-                seen["client"] = client
-
-        worker = _Worker()
-        worker.conversation = conversation
-        chat_widget._LLMWorker.run(worker)
+        monkeypatch.setattr("freecad_ai.llm.fallback.create_client",
+                            fake_create)
+        worker = chat_widget._LLMWorker(conversation, "S")
+        worker._simple_stream = lambda walker: seen.setdefault(
+            "client", walker.open(0, lambda c: iter(()))[0])
+        worker.run()
         return seen
 
-    def test_the_worker_passes_the_conversation_id(self, monkeypatch):
+    def test_the_worker_passes_the_conversation_id(self, monkeypatch,
+                                                   tmp_config_dir):
         conv = Conversation()
 
-        seen = self._run(conv, monkeypatch)
+        seen = self._run(conv, monkeypatch, tmp_config_dir)
 
         assert seen["cache_key"] == conv.conversation_id
         assert seen["client"].cache_key == conv.conversation_id
-
-    def test_a_worker_without_a_conversation_passes_nothing(self, monkeypatch):
-        """Act mode always has one; the simple-stream path may not."""
-        assert self._run(None, monkeypatch)["cache_key"] == ""

@@ -187,7 +187,7 @@ class _LLMWorker(QThread):
       1. Stream LLM response, collecting text + tool calls
       2. If no tool calls -> done
       3. For each tool call, dispatch to main thread and wait for result
-      4. Append results to messages, loop back to step 1
+      4. Record the round on the turn's working copy, loop back to step 1
     """
 
     token_received = Signal(str)           # Text delta
@@ -198,17 +198,28 @@ class _LLMWorker(QThread):
     tool_call_finished = Signal(str, str, bool, str)  # (tool_name, call_id, success, output)
     tool_exec_requested = Signal(str, str) # (tool_name, arguments_json) — dispatches to main thread
     vision_note = Signal(str)              # Vision description status note
+    fallback_note = Signal(str)  # a fallback profile answered (#104)
 
-    def __init__(self, messages, system_prompt, tools=None, registry=None,
-                 api_style="openai", conversation=None, describe_fn=None, parent=None):
+    def __init__(self, conversation, system_prompt, *, registry=None,
+                 filter_names=None, describe_fn=None, strip_images=False,
+                 start_index=0, needs_vision=False, parent=None):
         super().__init__(parent)
-        self.messages = list(messages)
-        self.system_prompt = system_prompt
-        self.tools = tools
-        self.registry = registry
-        self.api_style = api_style
+        # The turn arrives neutral: no vendor format, no rendered messages.
+        # Each request is rendered for the client about to answer it,
+        # which after a fallback may be a different vendor (#104).
         self.conversation = conversation
+        self._work = conversation.fork_for_turn()
+        self.system_prompt = system_prompt
+        self.registry = registry
+        self.filter_names = filter_names
         self.describe_fn = describe_fn
+        self.strip_images = strip_images
+        self.start_index = start_index
+        self._needs_vision = needs_vision
+        self.api_style = "openai"  # the answering client's, set per request
+        self._detached = False
+        self.fallback_attempts = []
+        self._describe_cache = {}
         self._full_response = ""
         self._thinking_text = ""
         self._tool_results = []
@@ -216,49 +227,44 @@ class _LLMWorker(QThread):
         self._tool_result_wait = QtCore.QWaitCondition()
         self._pending_result = None
         self._max_tool_turns = get_config().max_tool_turns  # 0 = endless
-        self._strip_thinking = False  # resolved in run()
-        self._optimize_caching = False  # resolved in run()
-        self._preserve_reasoning = True  # resolved in run()
+        self._strip_thinking = False  # resolved per client in _apply_client
+        self._optimize_caching = False
+        self._preserve_reasoning = True
         self._final_reasoning = ""  # thinking of the turn that ends the run (#84)
         self._tool_timeline = []  # timing data for summary visualization
         self._response_truncated = False  # response hit the output-token limit
         self._response_max_tokens = None  # the cap the client ran with (#103)
 
+    def detach(self):
+        """The widget gave up on this run (Stop, then 2 s of silence).
+        From now on nothing leaves this thread (#104)."""
+        self._detached = True
+        self.requestInterruption()
+
+    def _emit(self, signal, *args):
+        if not self._detached:
+            signal.emit(*args)
+
     def run(self):
         try:
-            from ..llm.client import create_client_from_config, should_strip_thinking
             from ..config import get_config as _get_config
-            # Every request in one conversation carries the same cache key, so
-            # the provider can keep routing them to the cluster that already
-            # holds the prefix (#47). It is the conversation id, which outlives
-            # a save/load, because Moonshot asks for a value that survives
-            # leaving and resuming a session.
-            client = create_client_from_config(
-                cache_key=getattr(self.conversation, "conversation_id", ""))
-            # The truncation warning quotes this: the cap may come from a
-            # profile row, and cfg can change while the turn runs (#103).
-            self._response_max_tokens = client.max_tokens
-            self._strip_thinking = should_strip_thinking(
-                client.model, _get_config().strip_thinking_history)
-            self._optimize_caching = _get_config().optimize_prompt_caching
-            self._preserve_reasoning = _get_config().preserve_reasoning_history
-
-            # Re-format messages with image interception on worker thread
-            if self.conversation and self.describe_fn:
-                wrapped = self._wrap_describe_fn(self.describe_fn)
-                self.messages = self.conversation.get_messages_for_api(
-                    api_style=self.api_style, describe_fn=wrapped,
-                    strip_thinking=self._strip_thinking,
-                )
-
-            if not self.tools:
-                # Simple non-tool streaming (backward compat)
-                self._simple_stream(client)
-                return
-
-            # Agentic tool loop
-            self._tool_loop(client)
-
+            from ..llm.fallback import FallbackWalker
+            walker = FallbackWalker(
+                _get_config(),
+                # One cache key per conversation, whichever profile answers,
+                # so the provider keeps routing to the cluster that holds
+                # the prefix (#47). It used to reach the client only when a
+                # describe_fn was set.
+                cache_key=self.conversation.conversation_id,
+                needs_tools=self.registry is not None,
+                needs_vision=self._needs_vision,
+                is_interrupted=self.isInterruptionRequested,
+                on_note=lambda text: self._emit(self.fallback_note, text))
+            self.fallback_attempts = walker.attempts
+            if self.registry is None:
+                self._simple_stream(walker)
+            else:
+                self._tool_loop(walker)
         except Exception as e:
             # The bubble gets the short form; the Report view gets the
             # stack. #89 arrived as the bare line "'NoneType' object is
@@ -267,21 +273,64 @@ class _LLMWorker(QThread):
             # way to tell us which. A turn that dies is a bug report
             # waiting to be written, so leave it something to quote.
             logger.exception("Chat turn failed: %s", e)
-            self.error_occurred.emit(str(e))
+            self._emit(self.error_occurred, str(e))
 
-    def _wrap_describe_fn(self, describe_fn):
-        """Wrap describe_fn to emit vision_note signals."""
-        def wrapped(b64_data):
+    def _apply_client(self, client):
+        """Take the per-request settings from the client that answered."""
+        from ..config import get_config as _get_config
+        from ..llm.client import should_strip_thinking
+        self.api_style = client.api_style
+        # The truncation warning quotes this: the cap may come from a
+        # profile row, and cfg can change while the turn runs (#103).
+        self._response_max_tokens = client.max_tokens
+        self._strip_thinking = should_strip_thinking(
+            client.model, _get_config().strip_thinking_history)
+        self._optimize_caching = _get_config().optimize_prompt_caching
+        self._preserve_reasoning = _get_config().preserve_reasoning_history
+
+    def _request(self, client):
+        """Render the turn for ``client`` and open its stream (lazily)."""
+        from ..config import get_config as _get_config
+        from ..llm.client import should_strip_thinking
+        messages = self._work.get_messages_for_api(
+            api_style=client.api_style,
+            strip_thinking=should_strip_thinking(
+                client.model, _get_config().strip_thinking_history),
+            strip_images=self.strip_images,
+            describe_fn=self._memo_describe if self.describe_fn else None,
+            start_index=self.start_index)
+        tools = None
+        if self.registry is not None:
+            tools = (self.registry.to_anthropic_schema(self.filter_names)
+                     if client.api_style == "anthropic"
+                     else self.registry.to_openai_schema(self.filter_names))
+        return client.stream_with_tools(messages, system=self.system_prompt,
+                                        tools=tools)
+
+    def _memo_describe(self, data_url):
+        """describe_fn, once per image per turn, with one status note.
+
+        Every request re-renders the history, so without this an image
+        would be sent to the vision tool once per round and per profile.
+        A failure is remembered too: the next render gets the same
+        placeholder instead of a second slow MCP call.
+        """
+        import hashlib
+        key = hashlib.sha256(data_url.encode("utf-8")).hexdigest()
+        if key not in self._describe_cache:
             try:
-                result = describe_fn(b64_data)
-                self.vision_note.emit("Image auto-described by llm-vision-mcp")
-                return result
+                self._describe_cache[key] = (True, self.describe_fn(data_url))
+                self._emit(self.vision_note,
+                           "Image auto-described by llm-vision-mcp")
             except Exception as e:
-                self.vision_note.emit(f"Image description failed: {e}")
-                raise
-        return wrapped
+                self._describe_cache[key] = (False, str(e))
+                self._emit(self.vision_note, f"Image description failed: {e}")
+        ok, value = self._describe_cache[key]
+        if not ok:
+            raise RuntimeError(value)
+        return value
 
-    def _simple_stream(self, client):
+    def _simple_stream(self, walker):
         """Stream without tools — Plan mode, and any provider-less request.
 
         This reads the *event* stream, the one the tool loop uses. The
@@ -293,21 +342,27 @@ class _LLMWorker(QThread):
 
         ``tools=None`` keeps the request byte-identical: both body builders
         gate tools behind ``if tools:``, and ``_openai_body`` reaches its
-        ``reasoning_effort`` branch either way.
+        ``reasoning_effort`` branch either way. It opens through the
+        fallback walker, so a Plan turn can fail over too (#104).
         """
+        opened = walker.open(0, self._request)
+        if opened is None:
+            self._full_response += "\n\n_⏹ Stopped by user._"
+            self._emit(self.response_finished, self._full_response)
+            return
+        client, events = opened
+        self._apply_client(client)
         thinking_parts = []
-        for event in client.stream_with_tools(
-            self.messages, system=self.system_prompt, tools=None
-        ):
+        for event in events:
             if self.isInterruptionRequested():
                 break
             if event.type == "text_delta":
                 self._full_response += event.text
-                self.token_received.emit(event.text)
+                self._emit(self.token_received, event.text)
             elif event.type == "thinking_delta":
                 thinking_parts.append(event.text)
                 self._thinking_text += event.text
-                self.thinking_received.emit(event.text)
+                self._emit(self.thinking_received, event.text)
             elif event.type == "done":
                 break
         # A Plan reply is the turn that ends the run, so it never reaches
@@ -316,12 +371,10 @@ class _LLMWorker(QThread):
             "".join(thinking_parts), self._strip_thinking,
             self._optimize_caching, self.api_style, self._preserve_reasoning)
         self._response_truncated = client.response_truncated
-        self.response_finished.emit(self._full_response)
+        self._emit(self.response_finished, self._full_response)
 
-    def _tool_loop(self, client):
+    def _tool_loop(self, walker):
         """Agentic loop: stream -> execute tools -> feed results -> repeat."""
-        messages = list(self.messages)
-
         turn = 0
         while should_continue_loop(self._max_tool_turns, turn, self.isInterruptionRequested()):
             text_parts = []
@@ -329,22 +382,26 @@ class _LLMWorker(QThread):
             tool_calls = []
 
             # Stream with tools
-            for event in client.stream_with_tools(
-                messages, system=self.system_prompt, tools=self.tools
-            ):
+            opened = walker.open(turn, self._request)
+            if opened is None:
+                break          # Stop before any profile answered
+            client, events = opened
+            self._apply_client(client)
+
+            for event in events:
                 if self.isInterruptionRequested():
                     break
                 if event.type == "text_delta":
                     text_parts.append(event.text)
                     self._full_response += event.text
-                    self.token_received.emit(event.text)
+                    self._emit(self.token_received, event.text)
                 elif event.type == "thinking_delta":
                     thinking_parts.append(event.text)
                     self._thinking_text += event.text
-                    self.thinking_received.emit(event.text)
+                    self._emit(self.thinking_received, event.text)
                 elif event.type == "tool_call_start":
                     if event.tool_call:
-                        self.tool_call_started.emit(event.tool_call.name, event.tool_call.id)
+                        self._emit(self.tool_call_started, event.tool_call.name, event.tool_call.id)
                 elif event.type == "tool_call_end":
                     if event.tool_call:
                         tool_calls.append(event.tool_call)
@@ -367,17 +424,17 @@ class _LLMWorker(QThread):
                     self._preserve_reasoning)
             if outcome == "stopped":
                 self._full_response += "\n\n_⏹ Stopped by user._"
-                self.response_finished.emit(self._full_response)
+                self._emit(self.response_finished, self._full_response)
                 return
             if outcome == "truncated":
                 # Cut off at the output limit. Any tool calls in this turn came
                 # from a half-formed payload, so the loop halts here instead of
                 # acting on them; the UI shows the truncation warning (#52).
                 self._response_truncated = True
-                self.response_finished.emit(self._full_response)
+                self._emit(self.response_finished, self._full_response)
                 return
             if outcome == "done":
-                self.response_finished.emit(self._full_response)
+                self._emit(self.response_finished, self._full_response)
                 return
 
             # Store the assistant message with tool calls in the conversation
@@ -386,47 +443,20 @@ class _LLMWorker(QThread):
                 for tc in tool_calls
             ]
 
-            # Add assistant message to local messages for next turn
-            if self.api_style == "anthropic":
-                content_blocks = []
-                if turn_text:
-                    content_blocks.append({"type": "text", "text": turn_text})
-                for tc in tool_calls:
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.arguments,
-                    })
-                messages.append({"role": "assistant", "content": content_blocks})
-            else:
-                oai_tcs = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in tool_calls
-                ]
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": turn_text or None,
-                    "tool_calls": oai_tcs,
-                }
-                # Preserve reasoning_content unless the model wants it stripped
-                # (e.g. Gemma strips thinking; Kimi-K2.5 requires it)
-                if turn_thinking and not self._strip_thinking:
-                    assistant_msg["reasoning_content"] = turn_thinking
-                messages.append(assistant_msg)
+            # Record the round on the turn's working copy; the next request
+            # renders it for whichever client answers that one (#104). The
+            # echo follows the answering model's strip rule, never
+            # preserve_reasoning_history -- that one only decides what is
+            # stored at the end of the turn.
+            self._work.add_assistant_message(
+                turn_text, tool_calls=tc_dicts,
+                reasoning_content=turn_thinking if not self._strip_thinking else "")
 
             # Execute each tool call on the main thread
             # Exception: optimize_iteration runs on worker thread (long-running
             # LLM calls would freeze the UI if dispatched to main thread).
             # Its inner tool calls dispatch to main thread via QtMainThreadToolExecutor.
-            tool_result_messages = []
+            results = []
             for tc in tool_calls:
                 # Pre-tool-use hook
                 from ..hooks import fire_hook as _fire_hook
@@ -456,7 +486,7 @@ class _LLMWorker(QThread):
                     "elapsed": elapsed, "turn": turn,
                 })
 
-                self.tool_call_finished.emit(tc.name, tc.id, success, result_text)
+                self._emit(self.tool_call_finished, tc.name, tc.id, success, result_text)
 
                 # Post-tool-use hook
                 _fire_hook("post_tool_use", {
@@ -468,25 +498,9 @@ class _LLMWorker(QThread):
                     "turn": turn,
                 })
 
-                if self.api_style == "anthropic":
-                    tool_result_messages.append({
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tc.id,
-                                "content": result_text,
-                            }
-                        ],
-                    })
-                else:
-                    tool_result_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result_text,
-                    })
+                self._work.add_tool_result(tc.id, result_text)
+                results.append({"tool_call_id": tc.id, "content": result_text})
 
-            messages.extend(tool_result_messages)
 
             # Store tool call info so the parent can update the conversation
             self._tool_results.append({
@@ -497,10 +511,7 @@ class _LLMWorker(QThread):
                     turn_thinking, self._strip_thinking, self._optimize_caching,
                     self.api_style, self._preserve_reasoning),
                 "tool_calls": tc_dicts,
-                "results": [
-                    {"tool_call_id": tc.id, "content": r["content"] if self.api_style != "anthropic" else r["content"][0]["content"]}
-                    for tc, r in zip(tool_calls, tool_result_messages)
-                ],
+                "results": results,
             })
             turn += 1
 
@@ -508,15 +519,15 @@ class _LLMWorker(QThread):
         # bubble; this chat-level note is an intentional, clearer second signal.
         if self.isInterruptionRequested():
             self._full_response += "\n\n_⏹ Stopped by user._"
-            self.response_finished.emit(self._full_response)
+            self._emit(self.response_finished, self._full_response)
             return
 
         # If we reach here, we hit the max turns limit
         limit_msg = "\n\n[{}]".format(
             translate("ChatDockWidget", "Reached maximum tool call iterations"))
         self._full_response += limit_msg
-        self.token_received.emit(limit_msg)
-        self.response_finished.emit(self._full_response)
+        self._emit(self.token_received, limit_msg)
+        self._emit(self.response_finished, self._full_response)
 
     def _execute_tool_on_main_thread(self, tool_name: str, arguments: dict) -> dict:
         """Dispatch tool execution to the main thread and wait for the result.
@@ -526,7 +537,7 @@ class _LLMWorker(QThread):
         calls set_tool_result().
         """
         self._pending_result = None
-        self.tool_exec_requested.emit(tool_name, json.dumps(arguments))
+        self._emit(self.tool_exec_requested, tool_name, json.dumps(arguments))
 
         self._tool_result_ready.lock()
         elapsed = 0

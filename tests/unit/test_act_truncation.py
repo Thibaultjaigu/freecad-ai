@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 from freecad_ai.core.loop_control import resolve_turn_outcome, should_continue_loop
 from freecad_ai.llm.client import LLMClient, LLMStreamEvent, ToolCall
+from tests.unit._worker_harness import OneClientWalker, add_seams
 
 
 class TestResolveTurnOutcome:
@@ -171,13 +172,10 @@ def _fake_worker(max_turns=30):
     provider. _tool_loop never calls super(), so it can be invoked unbound
     against this fake to exercise the halt decision on its own.
     """
-    return SimpleNamespace(
-        messages=[{"role": "user", "content": "make a box"}],
+    return add_seams(SimpleNamespace(
         system_prompt="",
-        tools=[],
         api_style="openai",
         registry=None,
-        conversation=None,
         _max_tool_turns=max_turns,
         _full_response="",
         _thinking_text="",
@@ -199,7 +197,7 @@ def _fake_worker(max_turns=30):
         _execute_tool_on_main_thread=MagicMock(
             side_effect=AssertionError(
                 "a truncated turn's tool calls must never be executed")),
-    )
+    ))
 
 
 class TestToolLoopHaltsOnTruncation:
@@ -218,7 +216,7 @@ class TestToolLoopHaltsOnTruncation:
         from freecad_ai.ui.chat_widget import _LLMWorker
         worker = _fake_worker()
         client = _FakeClient(events or self._TOOL_TURN, truncated)
-        _LLMWorker._tool_loop(worker, client)  # type: ignore[arg-type]
+        _LLMWorker._tool_loop(worker, OneClientWalker(client))  # type: ignore[arg-type]
         return worker
 
     def test_truncated_turn_does_not_execute_tool_calls(self):
@@ -248,18 +246,11 @@ class TestTruncationWarningNamesTheAppliedCap:
     """#103: the cap can come from a profile row, so the warning must quote
     the client that ran, not cfg.max_tokens."""
 
-    def test_run_records_the_clients_cap(self, monkeypatch, tmp_config_dir):
-        import freecad_ai.llm.client as client_mod
+    def test_the_answering_clients_cap_is_recorded(self, tmp_config_dir):
         from freecad_ai.ui.chat_widget import _LLMWorker
-        fake_client = SimpleNamespace(model="qwen3:8b", max_tokens=16000)
-        monkeypatch.setattr(client_mod, "create_client_from_config",
-                            lambda **k: fake_client)
-        worker = SimpleNamespace(
-            conversation=None, describe_fn=None, tools=[],
-            _simple_stream=lambda c: None, _tool_loop=lambda c: None,
-            error_occurred=MagicMock(), _response_max_tokens=None)
-        _LLMWorker.run(worker)  # type: ignore[arg-type]
-        worker.error_occurred.emit.assert_not_called()
+        worker = SimpleNamespace(_response_max_tokens=None)
+        _LLMWorker._apply_client(worker, SimpleNamespace(
+            model="qwen3:8b", max_tokens=16000, api_style="openai"))  # type: ignore[arg-type]
         assert worker._response_max_tokens == 16000
 
     def test_the_warning_points_at_behavior_and_the_row(self):

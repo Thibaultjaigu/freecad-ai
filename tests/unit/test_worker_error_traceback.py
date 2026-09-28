@@ -38,15 +38,26 @@ class _Worker:
     """The attributes ``run`` touches before it reaches its handler."""
 
     def __init__(self):
-        self.conversation = None
+        from freecad_ai.core.conversation import Conversation
+        self.conversation = Conversation()
+        self.registry = None
+        self._needs_vision = False
+        self.fallback_note = _Signal()
         self.error_occurred = _Signal()
+        self._simple_stream = lambda walker: walker.open(0, lambda c: iter(()))
+
+    def isInterruptionRequested(self):
+        return False
+
+    def _emit(self, signal, *args):
+        signal.emit(*args)
 
 
-def test_run_logs_the_traceback_and_emits_the_short_message(caplog):
+def test_run_logs_the_traceback_and_emits_the_short_message(caplog, tmp_config_dir):
     worker = _Worker()
     boom = TypeError("'NoneType' object is not iterable")
 
-    with patch("freecad_ai.llm.client.create_client_from_config", side_effect=boom):
+    with patch("freecad_ai.llm.fallback.create_client", side_effect=boom):
         with caplog.at_level(logging.ERROR, logger="freecad_ai.ui.chat_widget"):
             cw._LLMWorker.run(worker)
 

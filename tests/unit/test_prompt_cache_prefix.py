@@ -287,9 +287,10 @@ class TestAttachingTheSnapshot:
                 assert "doc_context" not in msg
 
     def test_the_vision_fallback_rerender_keeps_it(self):
-        """_LLMWorker.run re-renders from the conversation when a
-        describe_fn is in play. The grafted-on version was lost there, so
-        non-vision users' models saw no document state at all."""
+        """_LLMWorker records each round on a working copy of the
+        conversation and re-renders it per request (#104). The grafted-on
+        version was lost there, so non-vision users' models saw no
+        document state at all."""
         conv = Conversation()
         conv.add_user_message("make a box")
         conv.attach_document_context("## D\nBody")

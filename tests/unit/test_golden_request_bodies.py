@@ -4,7 +4,9 @@ The fallback refactor moves vendor rendering from _tool_loop's hand-built
 in-flight messages to Conversation.get_messages_for_api on a working copy.
 Any byte that moves invalidates every provider's prefix cache (#47). This
 file was written against the pre-refactor worker; its fixtures are the
-contract. Never regenerate them after the refactor starts.
+contract. Never regenerate them after the refactor starts. The driver
+now runs the refactored worker; the fixtures are still the pre-refactor
+bytes.
 
 Regenerate (only before the refactor):
     FREECAD_AI_WRITE_GOLDEN=1 env PYTHONPATH= .venv/bin/pytest \
@@ -146,17 +148,13 @@ def _capture(client, rounds):
 
 
 def _drive(style, client, conv, reg):
-    """Run one tool turn through the worker as it exists today."""
+    """Run one tool turn through the worker."""
     from freecad_ai.ui.chat_widget import _LLMWorker
-    schema = (reg.to_anthropic_schema() if style == "anthropic"
-              else reg.to_openai_schema())
-    worker = _LLMWorker(conv.get_messages_for_api(api_style=style), "SYSTEM",
-                        tools=schema, registry=reg, api_style=style,
-                        conversation=None)
+    worker = _LLMWorker(conv, "SYSTEM", registry=reg,
+                        start_index=conv.window_start())
     worker._execute_tool_on_main_thread = (
         lambda n, a: {"success": True, "output": "ok", "error": ""})
-    with patch("freecad_ai.llm.client.create_client_from_config",
-               return_value=client), \
+    with patch("freecad_ai.llm.fallback.create_client", return_value=client), \
          patch("freecad_ai.hooks.fire_hook", return_value={}):
         worker.run()
     return worker
