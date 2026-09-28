@@ -150,6 +150,47 @@ def _check_probe_response(response: str, expected_number: int) -> bool:
 # Vendors documenting `prompt_cache_key` on the chat-completions body.
 _CACHE_KEY_PROVIDERS = {"moonshot", "openai"}
 
+# Anthropic `error.type` values that are the request's fault, not the
+# vendor's — a retry or a fallback profile would fail the same way (#104).
+# Everything else (overloaded_error, api_error, rate_limit_error, and any
+# type Anthropic adds later) is treated as worth trying another profile.
+_ANTHROPIC_STREAM_CONFIG_ERRORS = {
+    "invalid_request_error", "authentication_error",
+    "permission_error", "not_found_error",
+}
+
+# HTTP-like codes an OpenAI-compatible server may put in an in-stream error
+# chunk's "code" field to mean "this request, not the vendor". Kept as a
+# small, explicit list rather than "anything 4xx" so a proxy's odd numbering
+# doesn't accidentally swallow a real outage (#104).
+_OPENAI_STREAM_CONFIG_CODES = {400, 401, 403, 404}
+
+
+def _classify_anthropic_stream_error(error: dict) -> "LLMError":
+    """Build the ``LLMError`` for an in-stream Anthropic ``event: error`` chunk."""
+    err_type = error.get("type") or ""
+    message = error.get("message") or "unknown error"
+    kind = ("config" if err_type in _ANTHROPIC_STREAM_CONFIG_ERRORS
+            else "unreachable")
+    text = f"{err_type}: {message}" if err_type else message
+    return LLMError(text, kind=kind)
+
+
+def _classify_openai_stream_error(error: dict) -> "LLMError":
+    """Build the ``LLMError`` for an in-stream OpenAI-style ``error`` chunk."""
+    err_type = error.get("type") or ""
+    message = error.get("message") or "unknown error"
+    code = error.get("code")
+    try:
+        code_int = int(code)
+    except (TypeError, ValueError):
+        code_int = None
+    is_config = (err_type == "invalid_request_error"
+                 or code_int in _OPENAI_STREAM_CONFIG_CODES)
+    kind = "config" if is_config else "unreachable"
+    text = f"{err_type}: {message}" if err_type else message
+    return LLMError(text, kind=kind)
+
 
 class LLMClient:
     """Unified client for multiple LLM providers."""
@@ -540,6 +581,9 @@ class LLMClient:
             self._openai_url(), self._openai_headers(), body)
         for chunk in stream:
             try:
+                error = chunk.get("error")
+                if error:
+                    raise _classify_openai_stream_error(error)
                 choices = chunk.get("choices", [])
                 if not choices:
                     continue
@@ -761,7 +805,10 @@ class LLMClient:
         for chunk in self._http_stream(self._anthropic_url(), self._anthropic_headers(), body):
             event_type = chunk.get("type") or ""
 
-            if event_type == "content_block_start":
+            if event_type == "error":
+                raise _classify_anthropic_stream_error(chunk.get("error") or {})
+
+            elif event_type == "content_block_start":
                 block = chunk.get("content_block") or {}
                 if block.get("type") == "tool_use":
                     current_tool_id = block.get("id") or ""

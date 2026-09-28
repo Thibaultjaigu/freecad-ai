@@ -272,3 +272,18 @@ class TestWalk:
             p.stop()
         assert client.label == "chat"
         assert list(events) == []
+
+    def test_an_overload_reported_inside_the_stream_moves_to_the_fallback(self):
+        """The client-side fix (#104 finding A) raises this before any event
+        is yielded, so the walker's existing failover path must catch it."""
+        overload = LLMError("overloaded_error: Overloaded", kind="unreachable")
+        walker, made, p = _walker(_cfg(["b"]))
+        try:
+            client, events = walker.open(
+                0, _request({"chat": overload, "b": ["e"]}))
+        finally:
+            p.stop()
+        assert client.label == "b"
+        assert list(events) == ["e"]
+        assert [a["outcome"] for a in walker.attempts] == ["failed", "answered"]
+
