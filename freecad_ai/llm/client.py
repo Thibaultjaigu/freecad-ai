@@ -176,6 +176,26 @@ def _current_claude_format(model: str) -> bool:
         return False
     return int(minor) > 6
 
+
+def _thinking_kind(value: str) -> str:
+    """How the request builders render a thinking value (#108).
+
+    "off", "on" and "extended" are the global vocabulary and keep the
+    bytes they always had ("off" / "preset"). "default" sends no thinking
+    field. Anything else came from a profile and goes to the vendor as
+    typed: ASCII digits are an Anthropic token budget, any other word a
+    level. Case-sensitive — "Off" is a word the vendor gets to reject.
+    """
+    if value == "off":
+        return "off"
+    if value in ("on", "extended"):
+        return "preset"
+    if value == "default":
+        return "default"
+    if value.isascii() and value.isdigit():
+        return "budget"
+    return "level"
+
 # Anthropic `error.type` values that are the request's fault, not the
 # vendor's — a retry or a fallback profile would fail the same way (#104).
 # Everything else (overloaded_error, api_error, rate_limit_error, and any
@@ -474,15 +494,18 @@ class LLMClient:
 
     def _openai_body(self, messages: list[dict], system: str, stream: bool,
                      tools: list[dict] | None = None) -> dict:
+        kind = _thinking_kind(self.thinking)
         msgs = []
         if system:
             sys_content = system
             # For Ollama: append /think or /no_think tags for models that support them
-            # (models that don't will just ignore these as text)
+            # (models that don't will just ignore these as text). Only for the
+            # global vocabulary: a profile's own value travels as
+            # reasoning_effort, which Ollama's /v1 validates (#108).
             if self.provider_name == "ollama":
-                if self.thinking == "off":
+                if kind == "off":
                     sys_content += "\n/no_think"
-                else:
+                elif kind == "preset":
                     sys_content += "\n/think"
             msgs.append({"role": "system", "content": sys_content})
         msgs.extend(messages)
@@ -506,10 +529,14 @@ class LLMClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
-        # OpenAI reasoning models (o1, o3, etc.)
-        elif self.thinking != "off":
+        if kind in ("level", "budget"):
+            # Set on the profile, so meant for Act mode too (#108).
+            body["reasoning_effort"] = self.thinking
+        # OpenAI reasoning models (o1, o3, etc.) — the global setting keeps
+        # its old "not with tools" rule, so an upgrade changes no request.
+        elif kind == "preset" and not tools:
             effort_map = {"on": "medium", "extended": "high"}
-            body["reasoning_effort"] = effort_map.get(self.thinking, "medium")
+            body["reasoning_effort"] = effort_map[self.thinking]
 
         # An OpenAI-style stream reports no usage at all unless asked, so
         # this is the price of measuring anything (#47). Only on streams —
@@ -730,8 +757,10 @@ class LLMClient:
             "x-api-key": self._resolve_api_key(),
             "anthropic-version": ANTHROPIC_API_VERSION,
         }
-        # Adaptive thinking interleaves without being asked (#107).
-        if self.thinking != "off" and not _current_claude_format(self.model):
+        # Only `type: enabled` thinking interleaves on request; adaptive
+        # does it unasked, and current models never take `enabled` (#107).
+        if (_thinking_kind(self.thinking) in ("preset", "budget")
+                and not _current_claude_format(self.model)):
             headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
         return headers
 
@@ -743,27 +772,31 @@ class LLMClient:
             "max_tokens": self.max_tokens,
             "stream": stream,
         }
-        if _current_claude_format(self.model):
-            # Current models 400 on `temperature` and on `type: enabled`
-            # (#107). Off sends no thinking key at all: Opus 5.5 rejects
-            # `disabled`, and these models think by default regardless.
-            if self.thinking != "off":
-                effort_map = {"on": "medium", "extended": "high"}
-                body["thinking"] = {"type": "adaptive"}
-                body["output_config"] = {
-                    "effort": effort_map.get(self.thinking, "medium")}
+        kind = _thinking_kind(self.thinking)
+        current = _current_claude_format(self.model)
+        if kind == "level" or (kind == "preset" and current):
+            # Adaptive thinking: current models take nothing else (#107),
+            # and a level typed on a profile is sent whatever the model —
+            # if the model refuses it, its 400 says so (#108).
+            effort = (self.thinking if kind == "level" else
+                      {"on": "medium", "extended": "high"}[self.thinking])
+            body["thinking"] = {"type": "adaptive"}
+            body["output_config"] = {"effort": effort}
             # A row the user set on this profile is still theirs to send.
             if "temperature" in self.model_params:
                 body["temperature"] = self.model_params["temperature"]
-        # Anthropic extended thinking requires temperature=1 and a budget
-        elif self.thinking != "off":
-            budget_map = {"on": 4096, "extended": 16384}
-            budget = budget_map.get(self.thinking, 4096)
+        elif kind in ("preset", "budget"):
+            # `type: enabled` requires temperature=1 and a budget.
+            budget = (int(self.thinking) if kind == "budget" else
+                      {"on": 4096, "extended": 16384}[self.thinking])
             body["temperature"] = 1
-            body["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": budget,
-            }
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        elif current:
+            # off / default. Current models 400 on a global temperature
+            # and think by default regardless; no key at all, since Opus
+            # 5.5 rejects `disabled` (#107).
+            if "temperature" in self.model_params:
+                body["temperature"] = self.model_params["temperature"]
         else:
             body["temperature"] = self.model_params.get(
                 "temperature", self.temperature
@@ -1303,8 +1336,9 @@ def create_client(cfg=None, utility: str | None = None, *,
     resolved profile. Job settings (max_tokens, temperature, thinking)
     come from the config unless the call site overrides them — the
     reranker wants 1024 tokens and no thinking whichever profile it runs
-    on. A valid ``max_tokens`` row in the profile's params sits between
-    the two: it beats the config, never a call-site override (#103).
+    on. A valid ``max_tokens`` row in the profile's params, and a
+    profile's own ``thinking`` value, sit between the two: they beat the
+    config, never a call-site override (#103, #108).
 
     An empty ``api_key`` on the profile falls back to the vendor-wide
     default in ``cfg.provider_keys``, so one Anthropic secret serves every
@@ -1325,6 +1359,9 @@ def create_client(cfg=None, utility: str | None = None, *,
     row_cap = take_max_tokens_row(params, _profile_label(cfg, chosen))
     if max_tokens is None:
         max_tokens = row_cap if row_cap is not None else cfg.max_tokens
+    if thinking is None:
+        thinking = (chosen.thinking if chosen.thinking is not None
+                    else cfg.thinking)
 
     return LLMClient(
         provider_name=chosen.name,
@@ -1333,7 +1370,7 @@ def create_client(cfg=None, utility: str | None = None, *,
         model=chosen.model,
         max_tokens=max_tokens,
         temperature=cfg.temperature if temperature is None else temperature,
-        thinking=cfg.thinking if thinking is None else thinking,
+        thinking=thinking,
         model_params=params,
         # Job settings like the three above, but with no call-site override:
         # caching is a property of the conversation, not of one call, and a

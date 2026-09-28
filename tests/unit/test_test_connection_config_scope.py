@@ -61,7 +61,7 @@ def _fake(cfg):
     return fake
 
 
-def _run(monkeypatch, cfg):
+def _run(monkeypatch, cfg, fake=None):
     """Drive _test_connection, returning the kwargs the probe thread got."""
     captured = {}
 
@@ -79,7 +79,7 @@ def _run(monkeypatch, cfg):
     monkeypatch.setattr(
         "freecad_ai.ui.settings_pages.provider_page.get_config", lambda: cfg)
 
-    ProviderPage._test_connection(_fake(cfg))
+    ProviderPage._test_connection(fake or _fake(cfg))
     return captured
 
 
@@ -180,3 +180,14 @@ class TestTheStagingHelperIsGone:
 
     def test_save_temp_no_longer_exists(self):
         assert not hasattr(SettingsDialog, "_save_temp")
+
+
+class TestTheProbeSendsTheProfilesThinking:
+    """#108: a level the model refuses fails here, not mid-chat."""
+
+    def test_profile_value_wins(self, monkeypatch):
+        cfg = _cfg()
+        cfg.thinking = "extended"
+        fake = _fake(cfg)
+        fake.section.current_profile.return_value.thinking = "xhigh"
+        assert _run(monkeypatch, cfg, fake)["thinking"] == "xhigh"

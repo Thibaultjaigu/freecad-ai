@@ -604,3 +604,95 @@ class TestFallbackList:
         section._delete_profile("local")
         section._refresh_profile_combo()
         assert self._listed(section) == ["spare"]
+
+
+def _th_cfg():
+    cfg = _cfg()
+    cfg.thinking = "extended"
+    cfg.profiles["cloud"].thinking = "xhigh"
+    return cfg
+
+
+class TestThinking:
+    """#108: the per-profile thinking value."""
+
+    def _items(self, section):
+        c = section.thinking_combo
+        return [c.itemText(i) for i in range(c.count())]
+
+    def test_label_and_editable(self, section):
+        form = section.thinking_combo.parentWidget().layout()
+        assert form.labelForField(section.thinking_combo).text() == "Thinking:"
+        assert section.thinking_combo.isEditable()
+
+    def test_anthropic_suggestions(self, section):
+        section.load(_th_cfg())
+        assert self._items(section) == [
+            "Use global", "Model default", "off",
+            "low", "medium", "high", "xhigh", "max"]
+
+    def test_openai_style_suggestions(self, section):
+        section.load(_th_cfg())
+        section.profile_combo.setCurrentIndex(
+            section.profile_combo.findData("local"))
+        assert self._items(section)[3:] == [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+    def test_each_profile_shows_its_own_value(self, section):
+        section.load(_th_cfg())
+        assert section.thinking_combo.currentText() == "xhigh"
+        section.profile_combo.setCurrentIndex(
+            section.profile_combo.findData("local"))
+        assert section.thinking_combo.currentText() == "Use global"
+
+    def test_use_global_tooltip_names_the_global_value(self, section):
+        section.load(_th_cfg())
+        tip = section.thinking_combo.itemData(0, ps_mod.QtCore.Qt.ToolTipRole)
+        assert "extended" in tip
+
+    def test_untouched_load_is_clean(self, section):
+        section.load(_th_cfg())
+        assert not section.is_dirty()
+
+    @pytest.mark.parametrize("typed,stored", [
+        ("Use global", None), ("Model default", "default"), ("off", "off"),
+        ("Low", "Low"), ("  high ", "high"), ("", None), ("9000", "9000")])
+    def test_typed_value_is_stored(self, section, typed, stored):
+        section.load(_th_cfg())
+        section.thinking_combo.setEditText(typed)
+        section.commit()
+        assert section.profiles()["cloud"].thinking == stored
+
+    def test_a_stored_unknown_value_round_trips(self, section):
+        cfg = _th_cfg()
+        cfg.profiles["cloud"].thinking = "ultra"
+        section.load(cfg)
+        assert section.thinking_combo.currentText() == "ultra"
+        assert not section.is_dirty()
+
+    def test_vendor_switch_keeps_the_value_and_swaps_suggestions(
+            self, section):
+        section.load(_th_cfg())
+        section.provider_combo.setCurrentIndex(
+            get_provider_names().index("ollama"))
+        assert section.thinking_combo.currentText() == "xhigh"
+        assert "none" in self._items(section)
+        assert section.profiles()["cloud"].thinking == "xhigh"
+
+    @pytest.mark.parametrize("typed", ["Low", "OFF"])
+    def test_typed_keys_keep_their_case(self, section, typed):
+        """setEditText bypasses the combo's completer; real keystrokes
+        don't, and its default is case-insensitive -- Enter then snapped
+        "Low" to the "low" suggestion (final review of #108)."""
+        try:
+            from PySide6 import QtTest
+        except ImportError:
+            from PySide2 import QtTest
+        section.load(_th_cfg())
+        combo = section.thinking_combo
+        combo.lineEdit().clear()
+        QtTest.QTest.keyClicks(combo.lineEdit(), typed)
+        QtTest.QTest.keyClick(combo.lineEdit(), ps_mod.QtCore.Qt.Key_Return)
+        section.commit()
+        assert section.profiles()["cloud"].thinking == typed
+

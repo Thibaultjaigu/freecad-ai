@@ -325,6 +325,8 @@ class TestProfileFieldRoundTrip:
             presetApplied=_Sig(),
         )
         fake._update_vision_ui = lambda profile: None
+        fake._fill_thinking_combo = lambda api_style: None
+        fake._show_thinking = lambda value: None
         fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
         fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
         return fake
@@ -736,6 +738,8 @@ def _selector_fake(cfg, label="cloud"):
     fake._rename_profile = (
         lambda old, new: ProviderSection._rename_profile(fake, old, new))
     fake._update_vision_ui = lambda profile: None
+    fake._fill_thinking_combo = lambda api_style: None
+    fake._show_thinking = lambda value: None
     fake._unknown_item_index = lambda: ProviderSection._unknown_item_index(fake)
     fake._drop_unknown_item = lambda: ProviderSection._drop_unknown_item(fake)
     return fake

@@ -122,7 +122,8 @@ class BehaviorPage(SettingsPage):
 
         # Thinking mode
         thinking_layout = QHBoxLayout()
-        thinking_layout.addWidget(QLabel(translate("SettingsDialog", "Thinking:")))
+        thinking_layout.addWidget(QLabel(
+            translate("SettingsDialog", "Thinking (default for profiles):")))
         self.thinking_combo = QComboBox()
         self.thinking_combo.addItems([
             translate("SettingsDialog", "Off"),
