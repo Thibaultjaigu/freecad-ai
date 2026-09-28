@@ -515,3 +515,92 @@ class TestCompactAbove:
         section.apply_to(out)
         assert out.profiles["cloud"].context_window == 80000
         assert out.profiles["local"].context_window is None
+
+
+class TestFallbackList:
+    """#104: the ordered fallback list, edited in the shared section."""
+
+    def _loaded(self, section, fallback=()):
+        c = _cfg()
+        c.profiles["spare"] = ProviderConfig(name="openai", model="m3")
+        c.fallback_profiles = list(fallback)
+        section.load(c)
+        return c
+
+    def _pick(self, section, label):
+        section.fallback_picker.setCurrentIndex(
+            section.fallback_picker.findData(label))
+
+    def _listed(self, section):
+        return [section.fallback_list.item(i).text()
+                for i in range(section.fallback_list.count())]
+
+    def test_the_group_title_and_tooltip(self, section):
+        assert section.fallback_group.title() == \
+            "Fallback when the chat model can't be reached"
+        assert section.fallback_group.toolTip() == (
+            "Tried once, in this order, after the chat profile fails to "
+            "answer. A paid profile in this list is used without asking.")
+
+    def test_load_shows_the_list(self, section):
+        self._loaded(section, ["spare", "local"])
+        assert self._listed(section) == ["spare", "local"]
+
+    def test_the_picker_offers_only_unlisted_profiles(self, section):
+        self._loaded(section, ["local"])
+        offered = [section.fallback_picker.itemData(i)
+                   for i in range(section.fallback_picker.count())]
+        assert "local" not in offered
+        assert "spare" in offered
+
+    def test_add_appends_and_dirties(self, section):
+        self._loaded(section)
+        self._pick(section, "spare")
+        section.fallback_add_btn.click()
+        assert self._listed(section) == ["spare"]
+        assert section.is_dirty() is True
+
+    def test_remove_drops_the_selected_row(self, section):
+        self._loaded(section, ["spare", "local"])
+        section.fallback_list.setCurrentRow(0)
+        section.fallback_remove_btn.click()
+        assert self._listed(section) == ["local"]
+
+    def test_up_and_down_reorder(self, section):
+        self._loaded(section, ["spare", "local"])
+        section.fallback_list.setCurrentRow(1)
+        section.fallback_up_btn.click()
+        assert self._listed(section) == ["local", "spare"]
+        assert section.fallback_list.currentRow() == 0
+        section.fallback_down_btn.click()
+        assert self._listed(section) == ["spare", "local"]
+
+    def test_up_on_the_first_row_does_nothing(self, section):
+        self._loaded(section, ["spare", "local"])
+        section.fallback_list.setCurrentRow(0)
+        section.fallback_up_btn.click()
+        assert self._listed(section) == ["spare", "local"]
+
+    def test_apply_writes_the_list(self, section):
+        self._loaded(section, ["local"])
+        self._pick(section, "spare")
+        section.fallback_add_btn.click()
+        target = _cfg()
+        section.apply_to(target)
+        assert target.fallback_profiles == ["local", "spare"]
+
+    def test_an_untouched_load_is_clean(self, section):
+        self._loaded(section, ["local"])
+        assert section.is_dirty() is False
+
+    def test_rename_carries_the_fallback_entry(self, section):
+        self._loaded(section, ["local"])
+        section._rename_profile("local", "box")
+        section._refresh_profile_combo()
+        assert self._listed(section) == ["box"]
+
+    def test_delete_removes_the_fallback_entry(self, section):
+        self._loaded(section, ["local", "spare"])
+        section._delete_profile("local")
+        section._refresh_profile_combo()
+        assert self._listed(section) == ["spare"]
