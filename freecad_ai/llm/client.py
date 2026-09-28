@@ -494,15 +494,18 @@ class LLMClient:
 
     def _openai_body(self, messages: list[dict], system: str, stream: bool,
                      tools: list[dict] | None = None) -> dict:
+        kind = _thinking_kind(self.thinking)
         msgs = []
         if system:
             sys_content = system
             # For Ollama: append /think or /no_think tags for models that support them
-            # (models that don't will just ignore these as text)
+            # (models that don't will just ignore these as text). Only for the
+            # global vocabulary: a profile's own value travels as
+            # reasoning_effort, which Ollama's /v1 validates (#108).
             if self.provider_name == "ollama":
-                if self.thinking == "off":
+                if kind == "off":
                     sys_content += "\n/no_think"
-                else:
+                elif kind == "preset":
                     sys_content += "\n/think"
             msgs.append({"role": "system", "content": sys_content})
         msgs.extend(messages)
@@ -526,10 +529,14 @@ class LLMClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
-        # OpenAI reasoning models (o1, o3, etc.)
-        elif self.thinking != "off":
+        if kind in ("level", "budget"):
+            # Set on the profile, so meant for Act mode too (#108).
+            body["reasoning_effort"] = self.thinking
+        # OpenAI reasoning models (o1, o3, etc.) — the global setting keeps
+        # its old "not with tools" rule, so an upgrade changes no request.
+        elif kind == "preset" and not tools:
             effort_map = {"on": "medium", "extended": "high"}
-            body["reasoning_effort"] = effort_map.get(self.thinking, "medium")
+            body["reasoning_effort"] = effort_map[self.thinking]
 
         # An OpenAI-style stream reports no usage at all unless asked, so
         # this is the price of measuring anything (#47). Only on streams —

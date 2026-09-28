@@ -106,3 +106,50 @@ class TestAnthropic:
             assert body["thinking"] == {"type": "adaptive"}
             assert body["output_config"]["effort"] == (
                 "medium" if thinking == "on" else "high")
+
+
+TOOLS = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+
+
+def _oai(provider, thinking, tools=None, model_params=None):
+    c = _llm(provider, "some-model", thinking, model_params=model_params)
+    return c._openai_body([], "sys", stream=False, tools=tools)
+
+
+def _system(body):
+    return body["messages"][0]["content"]
+
+
+class TestOpenAIStyle:
+    @pytest.mark.parametrize("provider", ["openai", "ollama"])
+    @pytest.mark.parametrize("tools", [None, TOOLS])
+    def test_a_level_is_sent_verbatim_even_with_tools(self, provider, tools):
+        assert _oai(provider, "xhigh", tools)["reasoning_effort"] == "xhigh"
+
+    def test_none_is_a_level_like_any_other(self):
+        assert _oai("openai", "none")["reasoning_effort"] == "none"
+
+    def test_a_number_is_sent_as_typed(self):
+        assert _oai("openai", "8000")["reasoning_effort"] == "8000"
+
+    @pytest.mark.parametrize("value", ["xhigh", "8000", "default"])
+    def test_verbatim_values_add_no_ollama_tag(self, value):
+        system = _system(_oai("ollama", value))
+        assert "/think" not in system and "/no_think" not in system
+
+    @pytest.mark.parametrize("provider", ["openai", "ollama"])
+    def test_default_sends_no_reasoning_effort(self, provider):
+        assert "reasoning_effort" not in _oai(provider, "default")
+
+    def test_global_on_with_tools_still_sends_no_effort(self):
+        assert "reasoning_effort" not in _oai("openai", "on", TOOLS)
+
+    @pytest.mark.parametrize("thinking,effort",
+                             [("on", "medium"), ("extended", "high")])
+    def test_global_on_without_tools_is_unchanged(self, thinking, effort):
+        assert _oai("openai", thinking)["reasoning_effort"] == effort
+
+    def test_ollama_tags_for_global_values_are_unchanged(self):
+        assert _system(_oai("ollama", "off")).endswith("\n/no_think")
+        assert _system(_oai("ollama", "on")).endswith("\n/think")
+        assert "reasoning_effort" not in _oai("ollama", "off")
