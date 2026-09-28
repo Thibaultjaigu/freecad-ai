@@ -228,6 +228,11 @@ class ProviderSection(QWidget):
         self.thinking_combo = QtWidgets.QComboBox()
         self.thinking_combo.setEditable(True)
         self.thinking_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        # Qt's default completer is case-insensitive, and Enter or a focus
+        # change then snaps "Low" to the "low" suggestion. Values are sent
+        # as typed, so the case must survive.
+        self.thinking_combo.completer().setCaseSensitivity(
+            QtCore.Qt.CaseSensitive)
         self.thinking_combo.setToolTip(
             translate("SettingsDialog",
                       "Sent to the vendor as-is. Anthropic: a level uses "

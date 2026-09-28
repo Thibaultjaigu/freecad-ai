@@ -678,3 +678,21 @@ class TestThinking:
         assert section.thinking_combo.currentText() == "xhigh"
         assert "none" in self._items(section)
         assert section.profiles()["cloud"].thinking == "xhigh"
+
+    @pytest.mark.parametrize("typed", ["Low", "OFF"])
+    def test_typed_keys_keep_their_case(self, section, typed):
+        """setEditText bypasses the combo's completer; real keystrokes
+        don't, and its default is case-insensitive -- Enter then snapped
+        "Low" to the "low" suggestion (final review of #108)."""
+        try:
+            from PySide6 import QtTest
+        except ImportError:
+            from PySide2 import QtTest
+        section.load(_th_cfg())
+        combo = section.thinking_combo
+        combo.lineEdit().clear()
+        QtTest.QTest.keyClicks(combo.lineEdit(), typed)
+        QtTest.QTest.keyClick(combo.lineEdit(), ps_mod.QtCore.Qt.Key_Return)
+        section.commit()
+        assert section.profiles()["cloud"].thinking == typed
+
