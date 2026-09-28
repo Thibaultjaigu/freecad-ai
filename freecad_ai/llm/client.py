@@ -1007,23 +1007,11 @@ class LLMClient:
                                    delay, attempt + 1, self.max_retries)
                     time.sleep(delay)
                     continue
-                error_body = ""
-                try:
-                    error_body = e.read().decode("utf-8")
-                except Exception:
-                    pass
-                raise LLMError(
-                    f"HTTP {e.code}: {e.reason}\n{error_body}", status=e.code,
-                    kind="unreachable" if e.code >= 500 or e.code == 429
-                    else "config")
+                raise self._classify_error(e)
             except urllib.error.URLError as e:
-                raise LLMError(f"Connection error: {e.reason}",
-                               kind="unreachable")
+                raise self._classify_error(e)
             except Exception as e:
-                # A timeout is an OSError; anything else is a local fault.
-                raise LLMError(f"Request failed: {e}",
-                               kind="unreachable" if isinstance(e, OSError)
-                               else "config")
+                raise self._classify_error(e)
 
     def _http_stream(self, url: str, headers: dict, body: dict) -> Generator[dict, None, None]:
         """Make a streaming HTTP POST with retry on 429. Yields parsed SSE data chunks."""
@@ -1046,23 +1034,11 @@ class LLMClient:
                                    delay, attempt + 1, self.max_retries)
                     time.sleep(delay)
                     continue
-                error_body = ""
-                try:
-                    error_body = e.read().decode("utf-8")
-                except Exception:
-                    pass
-                raise LLMError(
-                    f"HTTP {e.code}: {e.reason}\n{error_body}", status=e.code,
-                    kind="unreachable" if e.code >= 500 or e.code == 429
-                    else "config")
+                raise self._classify_error(e)
             except urllib.error.URLError as e:
-                raise LLMError(f"Connection error: {e.reason}",
-                               kind="unreachable")
+                raise self._classify_error(e)
             except Exception as e:
-                # A timeout is an OSError; anything else is a local fault.
-                raise LLMError(f"Request failed: {e}",
-                               kind="unreachable" if isinstance(e, OSError)
-                               else "config")
+                raise self._classify_error(e)
 
         try:
             buffer = ""
@@ -1114,6 +1090,34 @@ class LLMClient:
             yield from resp
         except OSError as e:
             raise LLMError(f"Request failed: {e}", kind="unreachable") from e
+
+    @staticmethod
+    def _classify_error(e: Exception) -> LLMError:
+        """Build the classified ``LLMError`` for a caught request exception.
+
+        One function so ``_http_post`` and ``_http_stream`` raise
+        identically (#104) instead of keeping two copies of the same
+        classification in sync. The retry decision itself — whether to
+        back off and try again — stays in each loop; this only runs once
+        a loop has decided to give up and raise.
+        """
+        if isinstance(e, urllib.error.HTTPError):
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8")
+            except Exception:
+                pass
+            return LLMError(
+                f"HTTP {e.code}: {e.reason}\n{error_body}", status=e.code,
+                kind="unreachable" if e.code >= 500 or e.code == 429
+                else "config")
+        if isinstance(e, urllib.error.URLError):
+            return LLMError(f"Connection error: {e.reason}",
+                            kind="unreachable")
+        # A timeout is an OSError; anything else is a local fault.
+        return LLMError(f"Request failed: {e}",
+                        kind="unreachable" if isinstance(e, OSError)
+                        else "config")
 
 
 # Models that require thinking content to be stripped from conversation
