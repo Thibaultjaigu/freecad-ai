@@ -65,6 +65,27 @@ logger = logging.getLogger(__name__)
 _DETACH_AFTER_MS = 2000
 
 
+def _render_note(text):
+    """A small grey display-only line, e.g. which profile answered."""
+    return ('<div style="color: #888; font-size: 9pt; margin: 2px 12px;">'
+            f'{_html_escape(text)}</div>')
+
+
+def _attach_turn_notes(messages, turn_start, notes):
+    """Pin this turn's notes to the turn's last assistant message, so the
+    re-render (which rebuilds the pane from the messages) keeps them.
+    Display only: the API renderers build fresh dicts and never copy the
+    field (#104). Idempotent; moves the notes if a later message closes
+    the turn, e.g. the summary after an error."""
+    if not notes or turn_start is None:
+        return
+    replies = [m for m in messages[turn_start:] if m.get("role") == "assistant"]
+    for msg in replies:
+        msg.pop("notes", None)
+    if replies:
+        replies[-1]["notes"] = list(notes)
+
+
 # Known binary file magic bytes — prevents misdetecting binary files as text
 _BINARY_MAGIC = (
     b"%PDF",          # PDF
@@ -887,6 +908,10 @@ class ChatDockWidget(QDockWidget):
         self.conversation = Conversation()
         self._worker = None
         self._detached_workers = []  # stopped but still running (#104)
+        self._last_worker = None     # Save Log after a detach (#104)
+        self._turn_open = False      # a worker's turn is in flight
+        self._turn_notes = []        # this turn's fallback notes
+        self._turn_start = None      # first message index of this turn
         self._input_history = InputHistory()
         self._suppress_history_reset = False  # set True around programmatic
                                               # _set_input_text() to guard a
@@ -1535,7 +1560,8 @@ class ChatDockWidget(QDockWidget):
         self._continue_send()
 
     def _schedule_detach(self, worker):
-        QtCore.QTimer.singleShot(_DETACH_AFTER_MS,
+        # ``self`` as context: the timer dies with the dock.
+        QtCore.QTimer.singleShot(_DETACH_AFTER_MS, self,
                                  lambda: self._detach_if_stuck(worker))
 
     def _detach_if_stuck(self, worker):
@@ -1543,9 +1569,10 @@ class ChatDockWidget(QDockWidget):
         ignores interruption -- a connect or read that only returns at its
         timeout, up to 300 s. Let it finish unheard and give the user the
         input back now (#104)."""
-        if worker is not self._worker or not worker.isRunning():
+        if (worker is not self._worker or not self._turn_open
+                or not worker.isRunning()):
             return
-        for signal, _ in ChatDockWidget._WORKER_SLOTS:
+        for signal, _ in self._WORKER_SLOTS:
             try:
                 getattr(worker, signal).disconnect()
             except (RuntimeError, TypeError):
@@ -1554,9 +1581,13 @@ class ChatDockWidget(QDockWidget):
         # A running QThread must never be destroyed: hold it until it ends.
         self._detached_workers.append(worker)
         worker.finished.connect(lambda: self._release_detached(worker))
+        if not worker.isRunning():   # ended between the check and the connect
+            self._release_detached(worker)
         self._store_tool_results(worker._full_response)
         self.conversation.save()
+        self._last_worker = worker   # Save Log still wants its trace
         self._worker = None
+        self._turn_open = False
         self._set_loading(False)
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -2164,7 +2195,7 @@ class ChatDockWidget(QDockWidget):
             registry=self._tool_registry, filter_names=filter_names,
             describe_fn=describe_fn, strip_images=strip_images,
             start_index=start_index,
-            needs_vision=ChatDockWidget._needs_vision(
+            needs_vision=self._needs_vision(
                 cfg, self.conversation, start_index))
 
     @staticmethod
@@ -2187,11 +2218,25 @@ class ChatDockWidget(QDockWidget):
         self._in_thinking = False
         self._tool_results_stored = False
         self._summary_rendered = False
-        self._worker = _LLMWorker(conversation, system_prompt, parent=self,
-                                  **worker_kwargs)
-        for signal, slot in ChatDockWidget._WORKER_SLOTS:
-            getattr(self._worker, signal).connect(getattr(self, slot))
-        self._worker.start()
+        self._turn_notes = []
+        self._turn_start = len(conversation.messages)
+        self._turn_open = True
+        worker = _LLMWorker(conversation, system_prompt, parent=self,
+                            **worker_kwargs)
+        self._worker = worker
+
+        # Qt still delivers signals queued before a disconnect(), so each
+        # slot runs only while this worker is the current one: a detached
+        # or replaced worker's last signals change nothing (#104).
+        def from_current(slot):
+            def call(*args):
+                if worker is self._worker:
+                    return slot(*args)
+            return call
+
+        for signal, slot in self._WORKER_SLOTS:
+            getattr(worker, signal).connect(from_current(getattr(self, slot)))
+        worker.start()
 
     def _save_session_log(self):
         """Save the current session log as JSON for debugging."""
@@ -2218,11 +2263,13 @@ class ChatDockWidget(QDockWidget):
                 entry["tool_call_id"] = msg["tool_call_id"]
             log_data["messages"].append(entry)
 
-        # Also include the last worker's tool results if available
-        if self._worker and hasattr(self._worker, "_tool_results") and self._worker._tool_results:
-            log_data["tool_trace"] = self._worker._tool_results
-        if self._worker and getattr(self._worker, "fallback_attempts", None):
-            log_data["fallback_attempts"] = self._worker.fallback_attempts
+        # Also include the last worker's tool results if available; after
+        # a Stop detached it, the detached worker still has them (#104).
+        worker = self._worker or getattr(self, "_last_worker", None)
+        if worker and hasattr(worker, "_tool_results") and worker._tool_results:
+            log_data["tool_trace"] = worker._tool_results
+        if worker and getattr(worker, "fallback_attempts", None):
+            log_data["fallback_attempts"] = worker.fallback_attempts
 
         try:
             with open(filepath, "w") as f:
@@ -2335,49 +2382,56 @@ class ChatDockWidget(QDockWidget):
 
     def _store_tool_results(self, full_response=""):
         """Store tool results from worker into conversation. Idempotent — skips if already stored."""
-        final_reasoning = getattr(self._worker, "_final_reasoning", "")
-        if not (self._worker and self._worker._tool_results):
-            if full_response:
-                self.conversation.add_assistant_message(
-                    full_response, reasoning_content=final_reasoning)
-            return
-
-        # Guard against double-storage (e.g., if both response_finished and error fire)
-        if getattr(self, '_tool_results_stored', False):
-            return
-        self._tool_results_stored = True
-
         try:
-            for turn_info in self._worker._tool_results:
-                tc_dicts = turn_info["tool_calls"]
-                self.conversation.add_assistant_message(
-                    turn_info["assistant_text"], tool_calls=tc_dicts,
-                    reasoning_content=turn_info.get("reasoning"),
-                )
-                for r in turn_info["results"]:
-                    self.conversation.add_tool_result(r["tool_call_id"], r["content"])
-            # Store the final text-only response
-            # Extract just the final part (after last tool round)
-            last_tool_end = sum(
-                len(t["assistant_text"]) for t in self._worker._tool_results
-            )
-            final_text = full_response[last_tool_end:] if last_tool_end < len(full_response) else full_response
-            if final_text.strip():
-                self.conversation.add_assistant_message(
-                    final_text, reasoning_content=final_reasoning)
-        except Exception as e:
+            final_reasoning = getattr(self._worker, "_final_reasoning", "")
+            if not (self._worker and self._worker._tool_results):
+                if full_response:
+                    self.conversation.add_assistant_message(
+                        full_response, reasoning_content=final_reasoning)
+                return
+
+            # Guard against double-storage (e.g., if both response_finished and error fire)
+            if getattr(self, '_tool_results_stored', False):
+                return
+            self._tool_results_stored = True
+
             try:
-                import FreeCAD
-                FreeCAD.Console.PrintError(f"_store_tool_results error: {e}\n")
-            except Exception:
-                pass
-            # Fallback: store at least the full response text
-            if full_response.strip():
-                self.conversation.add_assistant_message(full_response)
+                for turn_info in self._worker._tool_results:
+                    tc_dicts = turn_info["tool_calls"]
+                    self.conversation.add_assistant_message(
+                        turn_info["assistant_text"], tool_calls=tc_dicts,
+                        reasoning_content=turn_info.get("reasoning"),
+                    )
+                    for r in turn_info["results"]:
+                        self.conversation.add_tool_result(r["tool_call_id"], r["content"])
+                # Store the final text-only response
+                # Extract just the final part (after last tool round)
+                last_tool_end = sum(
+                    len(t["assistant_text"]) for t in self._worker._tool_results
+                )
+                final_text = full_response[last_tool_end:] if last_tool_end < len(full_response) else full_response
+                if final_text.strip():
+                    self.conversation.add_assistant_message(
+                        final_text, reasoning_content=final_reasoning)
+            except Exception as e:
+                try:
+                    import FreeCAD
+                    FreeCAD.Console.PrintError(f"_store_tool_results error: {e}\n")
+                except Exception:
+                    pass
+                # Fallback: store at least the full response text
+                if full_response.strip():
+                    self.conversation.add_assistant_message(full_response)
+        finally:
+            # Every exit, including the double-storage guard: idempotent.
+            _attach_turn_notes(self.conversation.messages,
+                               getattr(self, "_turn_start", None),
+                               getattr(self, "_turn_notes", None))
 
     @Slot(str)
     def _on_response_finished(self, full_response):
         """Handle completion of LLM response."""
+        self._turn_open = False
         self._set_loading(False)
 
         # Close the streaming div
@@ -2521,6 +2575,7 @@ class ChatDockWidget(QDockWidget):
         Preserves any tool results from earlier turns, then appends the error
         without re-rendering (to keep the streaming HTML intact).
         """
+        self._turn_open = False
         self._set_loading(False)
 
         # Close the streaming div
@@ -2555,6 +2610,9 @@ class ChatDockWidget(QDockWidget):
                 translate("ChatDockWidget",
                           "All operations completed successfully:") + "\n\n" + summary
             )
+            _attach_turn_notes(self.conversation.messages,
+                               getattr(self, "_turn_start", None),
+                               getattr(self, "_turn_notes", None))
             self.conversation.save()
         else:
             # No tool results — show the raw error
@@ -2583,11 +2641,10 @@ class ChatDockWidget(QDockWidget):
 
     def _on_fallback_note(self, text: str):
         """Show which profile answered after a failover (#104). Display
-        only: never stored, so it never reaches a model."""
-        self._append_html(
-            '<div style="color: #888; font-size: 9pt; margin: 2px 12px;">'
-            f'{_html_escape(text)}</div>'
-        )
+        only: kept on the turn's reply for the re-render, never sent to a
+        model."""
+        self._turn_notes.append(text)
+        self._append_html(_render_note(text))
 
     @Slot(str, str)
     def _execute_tool_call(self, tool_name, arguments_json):
@@ -2701,7 +2758,7 @@ class ChatDockWidget(QDockWidget):
         self._start_worker(
             self.conversation, system_prompt,
             strip_images=not cfg.supports_vision, start_index=start_index,
-            needs_vision=ChatDockWidget._needs_vision(
+            needs_vision=self._needs_vision(
                 cfg, self.conversation, start_index))
 
     def execute_code_from_plan(self, code):
@@ -2805,6 +2862,8 @@ class ChatDockWidget(QDockWidget):
             mode = "plan" if self.mode_combo.currentIndex() == 0 else "act"
 
             for msg in self.conversation.messages:
+                for note in msg.get("notes", ()):
+                    html_parts.append(_render_note(note))
                 if msg["role"] == "tool_result":
                     # Tool results are rendered inline via tool_call_finished signals
                     continue

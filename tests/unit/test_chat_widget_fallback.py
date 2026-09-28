@@ -31,7 +31,8 @@ def _detach_fake(worker):
         _worker=worker, _detached_workers=[],
         _store_tool_results=MagicMock(), conversation=MagicMock(),
         chat_display=MagicMock(), _set_loading=MagicMock(),
-        _append_html=MagicMock(), _WORKER_SLOTS=W._WORKER_SLOTS)
+        _append_html=MagicMock(), _WORKER_SLOTS=W._WORKER_SLOTS,
+        _turn_open=True)
     fake._release_detached = lambda w: W._release_detached(fake, w)
     return fake
 
@@ -87,7 +88,7 @@ def test_a_detached_worker_is_released_when_it_ends():
 
 
 def test_the_fallback_note_is_escaped():
-    fake = SimpleNamespace(_append_html=MagicMock())
+    fake = SimpleNamespace(_append_html=MagicMock(), _turn_notes=[])
     W._on_fallback_note(fake, "⚠ a<b couldn't be reached — answered by c")
     html = fake._append_html.call_args[0][0]
     assert "a&lt;b" in html
@@ -109,7 +110,8 @@ def test_start_worker_connects_every_slot(monkeypatch):
             made["started"] = True
 
     monkeypatch.setattr(cw, "_LLMWorker", _Fake)
-    fake = SimpleNamespace(_set_loading=MagicMock(), _append_html=MagicMock())
+    fake = SimpleNamespace(_set_loading=MagicMock(), _append_html=MagicMock(),
+                           _WORKER_SLOTS=W._WORKER_SLOTS)
     for _, slot in W._WORKER_SLOTS:
         setattr(fake, slot, MagicMock())
     conv = Conversation()
@@ -135,6 +137,7 @@ def test_the_retry_path_hands_over_the_conversation(monkeypatch, tmp_config_dir)
         _retry_count=0, conversation=conv, _capture_mode_override="off",
         _append_html=MagicMock(),
         mode_combo=SimpleNamespace(currentIndex=lambda: 1),
+        _needs_vision=W._needs_vision,
         _start_worker=lambda c, s, **kw: started.update(kw, conv=c, system=s))
     W._handle_execution_error(fake, SimpleNamespace(stderr="boom"))
     assert started["conv"] is conv
@@ -171,3 +174,214 @@ def test_the_session_log_carries_the_attempts(monkeypatch, tmp_config_dir):
     [name] = os.listdir(config_mod.LOGS_DIR)
     with open(os.path.join(config_mod.LOGS_DIR, name)) as f:
         assert json.load(f)["fallback_attempts"][0]["error"] == "HTTP 503"
+
+
+# ── Fix round 1 ──────────────────────────────────────────────
+
+NOTE = "⚠ a<b couldn't be reached — answered by c"
+
+
+def _note_fake(conv):
+    return SimpleNamespace(
+        conversation=conv, _worker=SimpleNamespace(_tool_results=[]),
+        _turn_notes=[], _turn_start=len(conv.messages),
+        _append_html=MagicMock(), chat_display=MagicMock(),
+        mode_combo=SimpleNamespace(currentIndex=lambda: 1))
+
+
+def _rendered(fake):
+    W._rerender_chat(fake)
+    return fake.chat_display.setHtml.call_args[0][0]
+
+
+def test_a_fallback_note_survives_the_rerender():
+    conv = Conversation(messages=[{"role": "user", "content": "go"}])
+    fake = _note_fake(conv)
+    W._on_fallback_note(fake, NOTE)
+    W._store_tool_results(fake, "THE-ANSWER")
+    html = _rendered(fake)
+    assert "a&lt;b" in html
+    assert html.index("a&lt;b") < html.index("THE-ANSWER")
+
+
+def test_two_notes_in_one_turn_both_survive_in_order():
+    conv = Conversation(messages=[{"role": "user", "content": "go"}])
+    fake = _note_fake(conv)
+    W._on_fallback_note(fake, "FIRST-NOTE")
+    W._on_fallback_note(fake, "SECOND-NOTE")
+    W._store_tool_results(fake, "THE-ANSWER")
+    html = _rendered(fake)
+    assert (html.index("FIRST-NOTE") < html.index("SECOND-NOTE")
+            < html.index("THE-ANSWER"))
+    assert html.count("FIRST-NOTE") == 1
+
+
+def test_the_notes_move_to_the_error_summary_and_show_once(monkeypatch):
+    conv = Conversation(messages=[{"role": "user", "content": "go"}])
+    fake = _note_fake(conv)
+    fake._worker = SimpleNamespace(_tool_results=[{
+        "assistant_text": "", "results": [{"tool_call_id": "c1",
+                                           "content": "ok"}],
+        "tool_calls": [{"id": "c1", "name": "t", "arguments": {}}]}])
+    fake._set_loading = MagicMock()
+    fake._auto_save_log = MagicMock()
+    fake._store_tool_results = lambda r="": W._store_tool_results(fake, r)
+    monkeypatch.setattr(Conversation, "save", lambda self: None)
+    W._on_fallback_note(fake, "ONLY-NOTE")
+    W._on_error(fake, "boom")
+    carrying = [m for m in conv.messages if m.get("notes")]
+    assert carrying == [conv.messages[-1]]
+    assert _rendered(fake).count("ONLY-NOTE") == 1
+
+
+def test_notes_never_reach_a_request_body():
+    import json
+    conv = Conversation(messages=[
+        {"role": "user", "content": "go", "doc_context": "DOC"},
+        {"role": "assistant", "content": "", "notes": ["N-TOOLS"],
+         "tool_calls": [{"id": "c1", "name": "t", "arguments": {}}]},
+        {"role": "tool_result", "tool_call_id": "c1", "content": "ok"},
+        {"role": "assistant", "content": "plain", "notes": ["N-PLAIN"],
+         "reasoning_content": "R"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image", "media_type": "image/png", "data": "AA"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "blocks"}],
+         "notes": ["N-BLOCKS"]},
+        {"role": "user", "content": "more"},
+    ])
+    for style in ("openai", "anthropic"):
+        for kw in ({}, {"strip_images": True},
+                   {"describe_fn": lambda b: "described"}):
+            body = json.dumps(conv.get_messages_for_api(api_style=style, **kw))
+            assert "N-" not in body and "notes" not in body, (style, kw)
+
+
+def test_notes_survive_a_session_save_and_load(tmp_config_dir):
+    conv = Conversation(messages=[
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "a", "notes": ["KEPT"]}])
+    conv.save()
+    loaded = Conversation.load(conv.conversation_id)
+    assert loaded.messages[-1]["notes"] == ["KEPT"]
+
+
+class _SignalWorker:
+    """Records the callable each signal was connected to."""
+
+    def __init__(self, conversation, system_prompt, **kw):
+        self.slots = {}
+        for signal, _ in W._WORKER_SLOTS:
+            setattr(self, signal, SimpleNamespace(
+                connect=lambda fn, s=signal: self.slots.__setitem__(s, fn)))
+
+    def start(self):
+        pass
+
+
+def _started(monkeypatch):
+    monkeypatch.setattr(cw, "_LLMWorker", _SignalWorker)
+    fake = SimpleNamespace(_set_loading=MagicMock(), _append_html=MagicMock(),
+                           _WORKER_SLOTS=W._WORKER_SLOTS)
+    for _, slot in W._WORKER_SLOTS:
+        setattr(fake, slot, MagicMock())
+    W._start_worker(fake, Conversation(), "S")
+    return fake, fake._worker
+
+
+def test_a_slot_runs_for_the_current_worker(monkeypatch):
+    fake, worker = _started(monkeypatch)
+    worker.slots["token_received"]("hi")
+    fake._on_token.assert_called_once_with("hi")
+
+
+@pytest.mark.parametrize("successor", [None, "newer"])
+def test_a_slot_queued_by_an_old_worker_changes_nothing(monkeypatch,
+                                                         successor):
+    fake, worker = _started(monkeypatch)
+    fake._worker = None if successor is None else _running_worker()
+    for signal, slot in W._WORKER_SLOTS:
+        worker.slots[signal]("x")
+        getattr(fake, slot).assert_not_called()
+
+
+def test_starting_a_worker_opens_the_turn(monkeypatch):
+    fake, _ = _started(monkeypatch)
+    assert fake._turn_open is True
+    assert fake._turn_notes == []
+
+
+def test_an_error_closes_the_turn():
+    fake = SimpleNamespace(
+        _turn_open=True, _set_loading=MagicMock(), chat_display=MagicMock(),
+        _store_tool_results=MagicMock(), conversation=Conversation(),
+        _worker=SimpleNamespace(_tool_results=[]), _append_html=MagicMock())
+    W._on_error(fake, "boom")
+    assert fake._turn_open is False
+
+
+def test_a_finished_response_closes_the_turn(monkeypatch):
+    monkeypatch.setattr("freecad_ai.hooks.fire_hook", lambda *a, **k: None)
+    fake = SimpleNamespace(
+        _turn_open=True, _set_loading=MagicMock(), chat_display=MagicMock(),
+        _store_tool_results=MagicMock(), conversation=MagicMock(),
+        _update_token_count=MagicMock(), _rerender_chat=MagicMock(),
+        mode_combo=SimpleNamespace(currentIndex=lambda: 1),
+        _capture_mode_override="off", _append_html=MagicMock(),
+        _worker=SimpleNamespace(_tool_results=[], _response_truncated=False,
+                                _tool_timeline=[]))
+    W._on_response_finished(fake, "")
+    assert fake._turn_open is False
+
+
+def test_a_detach_after_the_turn_closed_does_nothing():
+    worker = _running_worker()
+    fake = _detach_fake(worker)
+    fake._turn_open = False
+    W._detach_if_stuck(fake, worker)
+    worker.detach.assert_not_called()
+    fake._store_tool_results.assert_not_called()
+    fake._append_html.assert_not_called()
+    assert fake._worker is worker
+
+
+def test_save_log_after_a_detach_keeps_the_trace(monkeypatch, tmp_config_dir):
+    import json
+    import os
+    from freecad_ai import config as config_mod
+    worker = _running_worker()
+    worker._tool_results = [{"assistant_text": "", "tool_calls": [],
+                             "results": []}]
+    worker.fallback_attempts = [{"round": 0, "profile": "a",
+                                 "outcome": "failed", "error": "HTTP 503"}]
+    fake = _detach_fake(worker)
+    W._detach_if_stuck(fake, worker)
+    fake.conversation = Conversation()
+    monkeypatch.setattr(cw, "LOGS_DIR", config_mod.LOGS_DIR)
+    W._save_session_log(fake)
+    [name] = os.listdir(config_mod.LOGS_DIR)
+    with open(os.path.join(config_mod.LOGS_DIR, name)) as f:
+        data = json.load(f)
+    assert data["fallback_attempts"][0]["error"] == "HTTP 503"
+    assert data["tool_trace"] == worker._tool_results
+
+
+def test_a_thread_that_ended_during_the_detach_is_released():
+    worker = _running_worker()
+    worker.isRunning.side_effect = [True, False]
+    fake = _detach_fake(worker)
+    W._detach_if_stuck(fake, worker)
+    assert fake._detached_workers == []
+    worker.deleteLater.assert_called_once()
+
+
+def test_the_detach_timer_dies_with_the_dock(monkeypatch):
+    timer = MagicMock()
+    monkeypatch.setattr(cw, "QtCore", SimpleNamespace(QTimer=timer))
+    fake = SimpleNamespace(_detach_if_stuck=MagicMock())
+    worker = object()
+    W._schedule_detach(fake, worker)
+    ms, context, fn = timer.singleShot.call_args[0]
+    assert (ms, context) == (cw._DETACH_AFTER_MS, fake)
+    fn()
+    fake._detach_if_stuck.assert_called_once_with(worker)
