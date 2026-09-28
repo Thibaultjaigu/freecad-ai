@@ -1305,3 +1305,60 @@ class TestCompactionThreshold:
         c = self._cfg()
         c.profiles["chat"].context_window = None
         assert compaction_threshold(c) == 20000
+
+
+class TestFallbackProfiles:
+    """#104: one global ordered list of profiles to try."""
+
+    def _data(self, fallback):
+        return {
+            "profiles": {"chat": {"name": "anthropic"},
+                         "local": {"name": "ollama"},
+                         "cloud": {"name": "openai"}},
+            "active_profile": "chat",
+            "fallback_profiles": fallback,
+        }
+
+    def test_defaults_to_empty(self):
+        assert AppConfig().fallback_profiles == []
+
+    def test_order_survives_a_save(self, tmp_config_dir):
+        c = AppConfig.from_dict(self._data(["cloud", "local"]))
+        save_config(c)
+        assert load_config().fallback_profiles == ["cloud", "local"]
+
+    def test_unknown_labels_are_dropped_with_a_warning(self, caplog):
+        c = AppConfig.from_dict(self._data(["gone", "local"]))
+        assert c.fallback_profiles == ["local"]
+        assert 'fallback profile "gone" dropped — no such profile' in caplog.text
+
+    def test_duplicates_keep_the_first(self):
+        c = AppConfig.from_dict(self._data(["local", "cloud", "local"]))
+        assert c.fallback_profiles == ["local", "cloud"]
+
+    def test_the_active_profile_is_kept(self):
+        c = AppConfig.from_dict(self._data(["chat", "local"]))
+        assert c.fallback_profiles == ["chat", "local"]
+
+    @pytest.mark.parametrize("bad", ["local", None, {"a": 1}, [["x"]]])
+    def test_a_malformed_value_loads_as_empty_or_filtered(self, bad):
+        assert AppConfig.from_dict(self._data(bad)).fallback_profiles == []
+
+
+class TestProfileCapabilities:
+    def test_vision_override_beats_detection(self):
+        from freecad_ai.config import profile_supports_vision
+        p = ProviderConfig(name="ollama", vision_detected=True,
+                           vision_override=False)
+        assert profile_supports_vision(p) is False
+
+    def test_tools_detection_beats_the_provider_flag(self):
+        from freecad_ai.config import profile_supports_tools
+        p = ProviderConfig(name="anthropic", tools_detected=False)
+        assert profile_supports_tools(p) is False
+
+    def test_the_properties_still_read_the_active_profile(self):
+        c = AppConfig()
+        c.profiles = {"a": ProviderConfig(name="ollama", vision_override=True)}
+        c.active_profile = "a"
+        assert c.supports_vision is True

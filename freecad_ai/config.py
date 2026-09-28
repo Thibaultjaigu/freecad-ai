@@ -524,12 +524,54 @@ def _join(path: str, part) -> str:
     return f"{path}.{part}" if path else str(part)
 
 
+def _clean_fallback_profiles(labels, profiles) -> list:
+    """Known labels only, first occurrence kept, order preserved (#104)."""
+    if not isinstance(labels, list):
+        return []
+    clean = []
+    for label in labels:
+        if not isinstance(label, str) or label not in profiles:
+            logger.warning('fallback profile "%s" dropped — no such profile',
+                           label)
+        elif label not in clean:
+            clean.append(label)
+    return clean
+
+
+def profile_supports_vision(profile) -> bool:
+    """Whether ``profile``'s model takes images: override, then detection."""
+    if profile.vision_override is not None:
+        return profile.vision_override
+    if profile.vision_detected is not None:
+        return profile.vision_detected
+    return False
+
+
+def profile_supports_tools(profile) -> bool:
+    """Whether ``profile``'s model calls tools.
+
+    Detected capability (from Ollama /api/show) takes precedence — it
+    catches the case where someone picks an embedding/reranker model
+    as the main model on a provider that the static table marks as
+    tool-capable. Otherwise fall back to the provider-wide flag.
+    """
+    if profile.tools_detected is not None:
+        return profile.tools_detected
+    from .llm.providers import supports_tools as _provider_supports_tools
+    return _provider_supports_tools(profile.name)
+
+
 @dataclass
 class AppConfig:
     profiles: dict = field(default_factory=dict)      # label -> ProviderConfig
     active_profile: str = ""                          # label chat uses
     provider_keys: dict = field(default_factory=dict) # vendor -> default api key
     utility_profiles: dict = field(default_factory=dict)  # utility -> label
+    # Profiles to try, in order, when the chat profile can't answer (#104).
+    # Walked once per turn. Empty = off. The active profile may appear
+    # here; it is skipped at run time, so switching the active profile
+    # never rewrites this list.
+    fallback_profiles: list = field(default_factory=list)
     mode: str = "plan"  # "plan" or "act"
     max_tokens: int = 4096
     context_window: int = 20000  # tokens — compaction triggers above this
@@ -730,27 +772,12 @@ class AppConfig:
     @property
     def supports_vision(self) -> bool:
         """Whether the active profile's LLM supports vision."""
-        profile = self.provider
-        if profile.vision_override is not None:
-            return profile.vision_override
-        if profile.vision_detected is not None:
-            return profile.vision_detected
-        return False
+        return profile_supports_vision(self.provider)
 
     @property
     def supports_tools(self) -> bool:
-        """Whether the current LLM supports tool calling.
-
-        Detected capability (from Ollama /api/show) takes precedence — it
-        catches the case where someone picks an embedding/reranker model
-        as the main model on a provider that the static table marks as
-        tool-capable. Otherwise fall back to the provider-wide flag.
-        """
-        profile = self.provider
-        if profile.tools_detected is not None:
-            return profile.tools_detected
-        from .llm.providers import supports_tools as _provider_supports_tools
-        return _provider_supports_tools(profile.name)
+        """Whether the active profile's LLM supports tool calling."""
+        return profile_supports_tools(self.provider)
 
     def to_dict(self) -> dict:
         """Serialise, including a legacy ``provider`` mirror.
@@ -814,6 +841,8 @@ class AppConfig:
         if not raw_profiles:
             cls._migrate_flat_provider(cfg, legacy_provider or {}, data)
         cls._adopt_legacy_capabilities(cfg, data)
+        cfg.fallback_profiles = _clean_fallback_profiles(
+            cfg.fallback_profiles, cfg.profiles)
         return cfg
 
     @staticmethod
