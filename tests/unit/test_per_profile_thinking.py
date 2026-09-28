@@ -153,3 +153,50 @@ class TestOpenAIStyle:
         assert _system(_oai("ollama", "off")).endswith("\n/no_think")
         assert _system(_oai("ollama", "on")).endswith("\n/think")
         assert "reasoning_effort" not in _oai("ollama", "off")
+
+
+from freecad_ai.llm.client import create_client  # noqa: E402
+
+
+def _cfg_two():
+    cfg = AppConfig()
+    cfg.thinking = "on"
+    cfg.profiles = {
+        "chat": ProviderConfig(name="anthropic", model=CURRENT_ID),
+        "local": ProviderConfig(name="ollama", model="qwen3:8b",
+                                base_url="http://localhost:11434/v1",
+                                thinking="none"),
+    }
+    cfg.active_profile = "chat"
+    return cfg
+
+
+class TestResolution:
+    def test_unset_profile_uses_global(self):
+        assert create_client(_cfg_two()).thinking == "on"
+
+    def test_profile_value_beats_global(self):
+        cfg = _cfg_two()
+        cfg.active_profile = "local"
+        assert create_client(cfg).thinking == "none"
+
+    def test_call_site_beats_profile(self):
+        cfg = _cfg_two()
+        cfg.active_profile = "local"
+        assert create_client(cfg, thinking="off").thinking == "off"
+
+    def test_a_utility_profile_uses_its_own_value(self):
+        cfg = _cfg_two()
+        cfg.utility_profiles["compaction"] = "local"
+        assert create_client(cfg, "compaction").thinking == "none"
+
+    def test_a_fallback_candidate_uses_its_own_value(self):
+        assert create_client(_cfg_two(), profile="local").thinking == "none"
+
+    def test_the_reranker_still_forces_off(self):
+        cfg = _cfg_two()
+        cfg.utility_profiles["rerank"] = "local"
+        cfg.profiles["local"].thinking = "high"
+        client = create_client(cfg, "rerank", max_tokens=1024,
+                               thinking="off")
+        assert client.thinking == "off"

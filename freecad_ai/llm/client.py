@@ -1336,8 +1336,9 @@ def create_client(cfg=None, utility: str | None = None, *,
     resolved profile. Job settings (max_tokens, temperature, thinking)
     come from the config unless the call site overrides them — the
     reranker wants 1024 tokens and no thinking whichever profile it runs
-    on. A valid ``max_tokens`` row in the profile's params sits between
-    the two: it beats the config, never a call-site override (#103).
+    on. A valid ``max_tokens`` row in the profile's params, and a
+    profile's own ``thinking`` value, sit between the two: they beat the
+    config, never a call-site override (#103, #108).
 
     An empty ``api_key`` on the profile falls back to the vendor-wide
     default in ``cfg.provider_keys``, so one Anthropic secret serves every
@@ -1358,6 +1359,9 @@ def create_client(cfg=None, utility: str | None = None, *,
     row_cap = take_max_tokens_row(params, _profile_label(cfg, chosen))
     if max_tokens is None:
         max_tokens = row_cap if row_cap is not None else cfg.max_tokens
+    if thinking is None:
+        thinking = (chosen.thinking if chosen.thinking is not None
+                    else cfg.thinking)
 
     return LLMClient(
         provider_name=chosen.name,
@@ -1366,7 +1370,7 @@ def create_client(cfg=None, utility: str | None = None, *,
         model=chosen.model,
         max_tokens=max_tokens,
         temperature=cfg.temperature if temperature is None else temperature,
-        thinking=cfg.thinking if thinking is None else thinking,
+        thinking=thinking,
         model_params=params,
         # Job settings like the three above, but with no call-site override:
         # caching is a property of the conversation, not of one call, and a
