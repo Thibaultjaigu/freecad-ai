@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.31.0-alpha] - 2026-09-28
 
 ### Added
 
@@ -42,6 +42,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   compaction runs on another one. Existing configs are unchanged: no profile
   has either value until you set one.
 
+- **Fallback profiles when the chat model can't be reached (#104).** A new
+  *Fallback when the chat model can't be reached* list in the provider
+  section names connection profiles to try, in order and once each. A
+  connection error, a timeout, HTTP 5xx/429, or an error sent inside a 200
+  stream (Anthropic's "Overloaded") before the first stream event moves the
+  turn to the next profile; an error after the first event ends the turn as
+  before. The request is rebuilt for each profile, so switching vendor
+  mid-turn works; a profile without the vision or tool support the turn needs
+  is skipped and the skip logged. Only the last profile keeps the 429
+  backoff. A short note above the reply names the profile that answered —
+  display only, never sent to a model — and Save Log includes every attempt.
+  Stop now returns the input within about 2 s even while a request hangs.
+  The list is empty by default, so nothing changes until you fill it.
+- **Per-profile thinking (#108).** Each connection profile has a *Thinking*
+  combo. *Global* (the default) keeps using the Behavior page's value, which
+  is now labelled "Thinking (default for profiles)". The combo is editable:
+  pick *off*, *on* or *extended*, or type what your model accepts — a level
+  such as `low`/`high`/`max`, or a number as an Anthropic token budget.
+  *default* sends nothing and leaves it to the vendor. OpenAI-compatible
+  providers, Ollama included, receive the value as `reasoning_effort`
+  verbatim (`off` → `none`). Test Connection sends the profile's value. The
+  wiki's Configuration page has a new section, "Setting up thinking for a
+  model". Existing configs are unchanged: no profile has a value until you
+  set one.
+
 ### Changed
 
 - **Edit → Preferences → FreeCAD AI now shows profiles and utility models**,
@@ -74,7 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - *Test Reranker* moved next to the Reranker utility dropdown. A provider's
   recommended reranker settings (#10) now apply when you save rather than
   flipping the fields on screen.
-- Test Connection uses the saved max output tokens and thinking mode.
+- Test Connection uses the saved max output tokens, and the profile's thinking
+  value (or the global one when the profile says *Global*, #108).
 - Test Connection now sits with the provider fields inside the scrolling
   page, no longer beside OK/Cancel.
 
@@ -87,6 +113,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Requests to current Claude models no longer fail with HTTP 400 (#107).**
+  Every Anthropic request to Opus 4.7 and later, Sonnet 5, Opus 5/5.5 and
+  Fable 5.1 was rejected: the workbench always sent `temperature`, which
+  these models no longer accept, and thinking *on*/*extended* sent
+  `type: enabled`, which they reject too. Older models (Claude 3.x and 4.0
+  to 4.6) get exactly the request they got before. For the current ones the
+  global temperature is no longer sent (a `temperature` row in the profile's
+  Model Parameters still is), *on*/*extended* become adaptive thinking with
+  medium/high effort, and *off* sends no thinking key at all.
+- **Quitting FreeCAD during a request no longer crashes it** with
+  `QThread: Destroyed while thread is still running`. Running workers are
+  kept alive until they end (#104).
+- **`prompt_cache_key` is now sent on every turn.** Since v0.27.0 it only
+  reached the client when a describe function was set, so the feature did
+  nothing on normal turns (#104).
+- **Plan mode formats messages for Anthropic correctly.** It used the
+  OpenAI style for Anthropic profiles and sent them `reasoning_content`
+  keys (#104).
 - **Clicking OK in Edit → Preferences no longer switches your connection
   profile to Anthropic (#97).** The provider combo on the preferences page
   listed 12 of the 22 providers the Settings dialog offers. With a profile on
@@ -110,6 +154,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that unedited preview silently pinned it onto the profile as an explicit
   override. The Settings dialog and the Preferences Provider page now write
   the table back only when it has actually changed (#101).
+
+### Maintenance
+
+- The unit test suite no longer writes into `~/.config/FreeCAD/FreeCADAI`.
+  Each run left folders there, which the workbench's launch-time cleanup
+  then renamed to `FreeCADAI.duplicate-cleanup-<number>`. If you ran the
+  tests, those folders hold only test output and can be deleted; keep the
+  one without a number, which is the real pre-v0.13 migration backup.
 
 ## [0.30.0-alpha] - 2026-09-23
 
