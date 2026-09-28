@@ -64,6 +64,18 @@ logger = logging.getLogger(__name__)
 # ignores interruption: the widget stops waiting for it (#104).
 _DETACH_AFTER_MS = 2000
 
+# Worker threads still running when FreeCAD quits. Qt deletes a dock's
+# children at teardown, and destroying a running QThread is qFatal (exit
+# 134). A request blocked in connect or read can outlive the dock by
+# minutes, so it leaves the dock's ownership and is held here until the
+# process ends (#104).
+_KEEP_UNTIL_EXIT = []
+
+
+def _keep_until_exit(thread):
+    thread.setParent(None)
+    _KEEP_UNTIL_EXIT.append(thread)
+
 
 def _render_note(text):
     """A small grey display-only line, e.g. which profile answered."""
@@ -990,6 +1002,12 @@ class ChatDockWidget(QDockWidget):
 
     def _mark_shutdown(self):
         self._shutting_down = True
+        running = [self._worker, getattr(self, "_compaction_worker", None)]
+        for worker in running + list(self._detached_workers):
+            # Close and aboutToQuit both land here: keep each thread once.
+            if (worker is not None and worker.isRunning()
+                    and worker not in _KEEP_UNTIL_EXIT):
+                _keep_until_exit(worker)
         t = getattr(self, "_dock_poll_timer", None)
         if t is not None:
             try:
@@ -1590,7 +1608,9 @@ class ChatDockWidget(QDockWidget):
             except (RuntimeError, TypeError):
                 pass       # nothing connected
         worker.detach()
-        # A running QThread must never be destroyed: hold it until it ends.
+        # A running QThread must never be destroyed: hold it until it ends,
+        # and not as the dock's child, which Qt deletes at quit.
+        worker.setParent(None)
         self._detached_workers.append(worker)
         worker.finished.connect(self._on_detached_finished)
         if not worker.isRunning():   # ended between the check and the connect

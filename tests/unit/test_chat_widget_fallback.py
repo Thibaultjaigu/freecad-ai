@@ -97,6 +97,61 @@ def test_a_detached_worker_is_released_when_it_ends():
     worker.deleteLater.assert_called_once()
 
 
+def test_a_detached_worker_leaves_the_docks_ownership():
+    """Qt deletes a dock's children at quit, and destroying a running
+    QThread is qFatal. A detached worker can block for minutes, so the
+    dock must not own it (live probe: exit 134 before this)."""
+    worker = _running_worker()
+    fake = _detach_fake(worker)
+    W._detach_if_stuck(fake, worker)
+    worker.setParent.assert_called_once_with(None)
+
+
+def _shutdown_fake(**workers):
+    return SimpleNamespace(_shutting_down=False, _dock_poll_timer=MagicMock(),
+                           _detached_workers=[], **workers)
+
+
+def test_shutdown_keeps_every_running_worker_alive_and_unowned(monkeypatch):
+    kept = []
+    monkeypatch.setattr(cw, "_KEEP_UNTIL_EXIT", kept)
+    current, compaction, detached = (_running_worker(), _running_worker(),
+                                     _running_worker())
+    fake = _shutdown_fake(_worker=current, _compaction_worker=compaction)
+    fake._detached_workers.append(detached)
+    W._mark_shutdown(fake)
+    W._mark_shutdown(fake)          # main-window Close, then aboutToQuit
+    for w in (current, compaction, detached):
+        w.setParent.assert_called_with(None)
+    assert kept == [current, compaction, detached]
+    assert fake._shutting_down
+
+
+def test_shutdown_leaves_finished_workers_alone(monkeypatch):
+    kept = []
+    monkeypatch.setattr(cw, "_KEEP_UNTIL_EXIT", kept)
+    done = _running_worker()
+    done.isRunning.return_value = False
+    fake = _shutdown_fake(_worker=done)      # no compaction worker ever ran
+    W._mark_shutdown(fake)
+    done.setParent.assert_not_called()
+    assert kept == []
+
+
+def test_keep_until_exit_unparents_a_real_thread(monkeypatch):
+    from freecad_ai.ui.compat import QtCore, QtWidgets
+    _app = (QtWidgets.QApplication.instance()  # noqa: F841 -- keep alive
+            or QtWidgets.QApplication([]))
+    kept = []
+    monkeypatch.setattr(cw, "_KEEP_UNTIL_EXIT", kept)
+    owner = QtCore.QObject()
+    thread = QtCore.QThread(owner)
+    cw._keep_until_exit(thread)
+    assert thread.parent() is None
+    assert kept == [thread]
+    assert owner.children() == []
+
+
 def test_the_fallback_note_is_escaped():
     fake = _as_slot_host(SimpleNamespace(_append_html=MagicMock(),
                                          _turn_notes=[]))
