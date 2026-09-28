@@ -63,8 +63,18 @@ class LLMStreamEvent:
 
 
 class LLMError(Exception):
-    """Error communicating with the LLM provider."""
-    pass
+    """Error communicating with the LLM provider.
+
+    ``kind`` tells the fallback walker (#104) whether another profile is
+    worth trying: ``"unreachable"`` (no connection, timeout, 5xx, 429) or
+    ``"config"`` (the provider answered and refused: 4xx, bad setup).
+    ``status`` is the HTTP code when there was one.
+    """
+
+    def __init__(self, message, status=None, kind="config"):
+        super().__init__(message)
+        self.status = status
+        self.kind = kind
 
 
 def _generate_probe_image() -> tuple[int, bytes]:
@@ -950,6 +960,11 @@ class LLMClient:
     _MAX_RETRIES = 5
     _BASE_BACKOFF = 2  # seconds
 
+    # A client that is not the last fallback candidate sets this to 0, so
+    # a rate-limited profile hands over at once instead of backing off
+    # for minutes (#104).
+    max_retries = _MAX_RETRIES
+
     def _check_ssl(self, url: str) -> None:
         """Raise LLMError if HTTPS is requested but SSL is unavailable."""
         if url.startswith("https") and not _HAS_SSL:
@@ -977,7 +992,7 @@ class LLMClient:
         timeout = 300 if self.provider_name == "ollama" else 120
         ctx = self._ssl_ctx if url.startswith("https") else None
 
-        for attempt in range(self._MAX_RETRIES + 1):
+        for attempt in range(self.max_retries + 1):
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
@@ -986,10 +1001,10 @@ class LLMClient:
                     self._log_usage()
                     return data
             except urllib.error.HTTPError as e:
-                if e.code == 429 and attempt < self._MAX_RETRIES:
+                if e.code == 429 and attempt < self.max_retries:
                     delay = self._get_retry_delay(e, attempt)
                     logger.warning("Rate limited (429), retrying in %.1fs (attempt %d/%d)",
-                                   delay, attempt + 1, self._MAX_RETRIES)
+                                   delay, attempt + 1, self.max_retries)
                     time.sleep(delay)
                     continue
                 error_body = ""
@@ -997,11 +1012,18 @@ class LLMClient:
                     error_body = e.read().decode("utf-8")
                 except Exception:
                     pass
-                raise LLMError(f"HTTP {e.code}: {e.reason}\n{error_body}")
+                raise LLMError(
+                    f"HTTP {e.code}: {e.reason}\n{error_body}", status=e.code,
+                    kind="unreachable" if e.code >= 500 or e.code == 429
+                    else "config")
             except urllib.error.URLError as e:
-                raise LLMError(f"Connection error: {e.reason}")
+                raise LLMError(f"Connection error: {e.reason}",
+                               kind="unreachable")
             except Exception as e:
-                raise LLMError(f"Request failed: {e}")
+                # A timeout is an OSError; anything else is a local fault.
+                raise LLMError(f"Request failed: {e}",
+                               kind="unreachable" if isinstance(e, OSError)
+                               else "config")
 
     def _http_stream(self, url: str, headers: dict, body: dict) -> Generator[dict, None, None]:
         """Make a streaming HTTP POST with retry on 429. Yields parsed SSE data chunks."""
@@ -1012,16 +1034,16 @@ class LLMClient:
         ctx = self._ssl_ctx if url.startswith("https") else None
 
         resp = None
-        for attempt in range(self._MAX_RETRIES + 1):
+        for attempt in range(self.max_retries + 1):
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
                 resp = urllib.request.urlopen(req, context=ctx, timeout=timeout)
                 break
             except urllib.error.HTTPError as e:
-                if e.code == 429 and attempt < self._MAX_RETRIES:
+                if e.code == 429 and attempt < self.max_retries:
                     delay = self._get_retry_delay(e, attempt)
                     logger.warning("Rate limited (429), retrying in %.1fs (attempt %d/%d)",
-                                   delay, attempt + 1, self._MAX_RETRIES)
+                                   delay, attempt + 1, self.max_retries)
                     time.sleep(delay)
                     continue
                 error_body = ""
@@ -1029,15 +1051,22 @@ class LLMClient:
                     error_body = e.read().decode("utf-8")
                 except Exception:
                     pass
-                raise LLMError(f"HTTP {e.code}: {e.reason}\n{error_body}")
+                raise LLMError(
+                    f"HTTP {e.code}: {e.reason}\n{error_body}", status=e.code,
+                    kind="unreachable" if e.code >= 500 or e.code == 429
+                    else "config")
             except urllib.error.URLError as e:
-                raise LLMError(f"Connection error: {e.reason}")
+                raise LLMError(f"Connection error: {e.reason}",
+                               kind="unreachable")
             except Exception as e:
-                raise LLMError(f"Request failed: {e}")
+                # A timeout is an OSError; anything else is a local fault.
+                raise LLMError(f"Request failed: {e}",
+                               kind="unreachable" if isinstance(e, OSError)
+                               else "config")
 
         try:
             buffer = ""
-            for raw_line in resp:
+            for raw_line in self._read_lines(resp):
                 line = raw_line.decode("utf-8")
                 buffer += line
                 # Process complete lines
@@ -1072,6 +1101,19 @@ class LLMClient:
         finally:
             resp.close()
             self._log_usage()
+
+    @staticmethod
+    def _read_lines(resp):
+        """Yield the response's lines; a dropped read is an LLMError.
+
+        A server that sends headers and then stalls times out here, before
+        the first event, which is exactly when the fallback walker still
+        switches profiles (#104).
+        """
+        try:
+            yield from resp
+        except OSError as e:
+            raise LLMError(f"Request failed: {e}", kind="unreachable") from e
 
 
 # Models that require thinking content to be stripped from conversation
@@ -1163,7 +1205,8 @@ def create_client(cfg=None, utility: str | None = None, *,
                   max_tokens: int | None = None,
                   temperature: float | None = None,
                   thinking: str | None = None,
-                  cache_key: str = "") -> LLMClient:
+                  cache_key: str = "",
+                  profile: str | None = None) -> LLMClient:
     """Build an LLMClient for one call site.
 
     Connection settings (vendor, url, key, model, params) come from the
@@ -1177,22 +1220,27 @@ def create_client(cfg=None, utility: str | None = None, *,
     default in ``cfg.provider_keys``, so one Anthropic secret serves every
     Anthropic profile while a gateway-authenticated Ollama profile can
     still carry its own.
+
+    ``profile`` names a profile by label and wins over ``utility``; the
+    fallback walker uses it (#104). An unknown label means the same as
+    None, so a profile deleted mid-turn never breaks the chat.
     """
     from ..config import get_config
     if cfg is None:
         cfg = get_config()
-    profile = resolve_profile(cfg, utility)
+    chosen = (cfg.profiles[profile] if profile in cfg.profiles
+              else resolve_profile(cfg, utility))
 
-    params = resolve_params(cfg, profile)
-    row_cap = take_max_tokens_row(params, _profile_label(cfg, profile))
+    params = resolve_params(cfg, chosen)
+    row_cap = take_max_tokens_row(params, _profile_label(cfg, chosen))
     if max_tokens is None:
         max_tokens = row_cap if row_cap is not None else cfg.max_tokens
 
     return LLMClient(
-        provider_name=profile.name,
-        base_url=profile.base_url,
-        api_key=profile.api_key or cfg.provider_keys.get(profile.name, ""),
-        model=profile.model,
+        provider_name=chosen.name,
+        base_url=chosen.base_url,
+        api_key=chosen.api_key or cfg.provider_keys.get(chosen.name, ""),
+        model=chosen.model,
         max_tokens=max_tokens,
         temperature=cfg.temperature if temperature is None else temperature,
         thinking=cfg.thinking if thinking is None else thinking,
