@@ -46,6 +46,32 @@ def _with_tool_history():
     return conv
 
 
+def _with_fallback(primary, fallback):
+    """Configure chat -> b as the fallback chain and route create_client to
+    the two scripted clients. Returns the patch and the profiles created."""
+    from freecad_ai.config import ProviderConfig, get_config
+    cfg = get_config()
+    cfg.profiles = {
+        "chat": ProviderConfig(name="ollama", tools_detected=True),
+        "b": ProviderConfig(name="ollama", tools_detected=True),
+    }
+    cfg.active_profile = "chat"
+    cfg.fallback_profiles = ["b"]
+    made = []
+
+    def fake_create(cfg_, *, profile=None, cache_key="", **k):
+        made.append(profile)
+        return fallback if profile == "b" else primary
+
+    return patch("freecad_ai.llm.fallback.create_client", fake_create), made
+
+
+def _refused():
+    """A round that fails before its first event, as a dead host does."""
+    raise LLMError("Connection error: refused", kind="unreachable")
+    yield  # pragma: no cover -- makes this a generator
+
+
 def _two_rounds():
     return [[thinking("plan it"), text("Making."), call("c1", size=1), DONE],
             [text("Done."), DONE]]
@@ -159,12 +185,30 @@ def test_the_round_is_recorded_for_the_widget(qapp, tmp_config_dir):
 
 
 def test_a_detached_worker_emits_nothing(qapp, tmp_config_dir):
-    worker = _LLMWorker(Conversation(), "S")
+    """Detached mid-stream, the worker still runs the turn to its end (the
+    thread is not running, so requestInterruption is a no-op here), and
+    nothing from the stream or the tool path reaches the widget."""
     got = []
-    worker.token_received.connect(got.append)
-    worker.detach()
-    worker._emit(worker.token_received, "late")
-    assert got == []
+    worker = _LLMWorker(Conversation(messages=[
+        {"role": "user", "content": "hi"}]), "S", registry=_registry())
+
+    def detach_after_first_token():
+        yield text("Making.")
+        worker.detach()
+        yield thinking("plan it")
+        yield call("c1", size=1)
+        yield DONE
+
+    for name in ("token_received", "thinking_received", "tool_call_started",
+                 "tool_call_finished", "response_finished", "error_occurred",
+                 "vision_note", "fallback_note"):
+        getattr(worker, name).connect(
+            lambda *args, name=name: got.append((name,) + args))
+    run_worker(worker, ScriptedClient(
+        [detach_after_first_token(), [text(" Done."), DONE]]))
+    assert got == [("token_received", "Making.")]
+    # The run did go on: a tool round and the final answer happened.
+    assert worker._tool_results and worker._full_response == "Making. Done."
 
 
 def test_stop_before_any_answer_ends_as_stopped(qapp, tmp_config_dir):
@@ -183,17 +227,76 @@ def test_stop_before_any_answer_ends_as_stopped(qapp, tmp_config_dir):
 
 
 def test_a_mid_stream_error_ends_the_turn(qapp, tmp_config_dir):
+    """Once the first event has arrived the profile has answered: an error
+    after it ends the turn and never falls back, even with a fallback
+    profile configured."""
     class _Dropping(ScriptedClient):
         def stream_with_tools(self, messages, system="", tools=None):
             yield text("par")
             raise LLMError("Request failed: reset", kind="unreachable")
 
-    errors = []
+    spare = ScriptedClient([[text("from b"), DONE]])
+    errors, tokens = [], []
     worker = _LLMWorker(Conversation(messages=[
         {"role": "user", "content": "hi"}]), "S")
     worker.error_occurred.connect(errors.append)
-    run_worker(worker, _Dropping([]))
+    worker.token_received.connect(tokens.append)
+    patcher, made = _with_fallback(_Dropping([]), spare)
+    with patcher:
+        worker.run()
     assert errors == ["Request failed: reset"]
+    assert made == [None]            # only the chat profile was built
+    assert spare.sent == []
+    assert [a["outcome"] for a in worker.fallback_attempts] == ["answered"]
+    assert tokens == ["par"]
+
+
+def test_a_vendor_switch_mid_turn_renders_each_round_for_its_client(
+        qapp, tmp_config_dir):
+    """The heart of #104: round 0 answered by an OpenAI-style profile,
+    round 1 refused there and answered by an Anthropic-style one. Each
+    request is rendered from the working copy for the client receiving it."""
+    primary = ScriptedClient(
+        [[thinking("plan it"), text("Making."), call("c1", size=1), DONE],
+         _refused()], api_style="openai")
+    spare = ScriptedClient([[text("Done."), DONE]], api_style="anthropic")
+    notes = []
+    worker = _LLMWorker(Conversation(messages=[
+        {"role": "user", "content": "hi"}]), "S", registry=_registry())
+    worker.fallback_note.connect(notes.append)
+    worker._execute_tool_on_main_thread = (
+        lambda name, args: {"success": True, "output": "made", "error": ""})
+    patcher, made = _with_fallback(primary, spare)
+    with patcher, patch("freecad_ai.hooks.fire_hook", return_value={}):
+        worker.run()
+
+    # Round 1 as the OpenAI client was sent it (and refused it).
+    oai = primary.sent[1]
+    assert "function" in oai["tools"][0]
+    assert oai["messages"][1]["role"] == "assistant"
+    assert oai["messages"][1]["tool_calls"][0]["function"]["name"] == "make_box"
+    assert oai["messages"][1]["reasoning_content"] == "plan it"
+    assert oai["messages"][2] == {"role": "tool", "tool_call_id": "c1",
+                                  "content": "made"}
+
+    # The same round as the Anthropic client was sent it.
+    ant = spare.sent[0]
+    assert "input_schema" in ant["tools"][0]
+    assert [m["role"] for m in ant["messages"]] == ["user", "assistant", "user"]
+    assert ant["messages"][1]["content"] == [
+        {"type": "text", "text": "Making."},
+        {"type": "tool_use", "id": "c1", "name": "make_box",
+         "input": {"size": 1}}]
+    assert ant["messages"][2]["content"] == [
+        {"type": "tool_result", "tool_use_id": "c1", "content": "made"}]
+
+    assert made == [None, "b"]
+    assert [(a["round"], a["profile"], a["outcome"])
+            for a in worker.fallback_attempts] == [
+        (0, "chat", "answered"), (1, "chat", "failed"), (1, "b", "answered")]
+    assert worker.api_style == "anthropic"
+    assert len(notes) == 1 and "answered by b" in notes[0]
+    assert worker._full_response == "Making.Done."
 
 
 def test_the_answering_clients_cap_is_recorded(qapp, tmp_config_dir):

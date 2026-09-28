@@ -183,7 +183,7 @@ def _extract_latest_user_text(conversation) -> str:
 class _LLMWorker(QThread):
     """Background thread that streams LLM responses with optional tool loop.
 
-    When tools are provided, implements an agentic loop:
+    When a registry is provided, implements an agentic loop:
       1. Stream LLM response, collecting text + tool calls
       2. If no tool calls -> done
       3. For each tool call, dispatch to main thread and wait for result
