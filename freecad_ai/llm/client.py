@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import re
 try:
     import ssl
     _HAS_SSL = True
@@ -149,6 +150,31 @@ def _check_probe_response(response: str, expected_number: int) -> bool:
 
 # Vendors documenting `prompt_cache_key` on the chat-completions body.
 _CACHE_KEY_PROVIDERS = {"moonshot", "openai"}
+
+# Claude generations that take the old request shape: `temperature`, and
+# thinking as `type: enabled` + `budget_tokens`. Current models reject both
+# with a 400, and Haiku 4.5 rejects the adaptive replacement, so no single
+# body serves every model (#107). This list is closed — Anthropic ships no
+# new models in the old shape — so anything *not* on it gets the current one.
+_LEGACY_CLAUDE_OLD_NAMING = re.compile(r"claude-(?:[0-3](?!\d)|instant)")
+_LEGACY_CLAUDE_4 = re.compile(r"claude-(?:opus|sonnet|haiku)-4(?:-(\d+))?")
+
+
+def _current_claude_format(model: str) -> bool:
+    """True for a Claude model that wants adaptive thinking and no
+    temperature. Ids naming no Claude model at all — another vendor's
+    model behind an Anthropic-compatible gateway — keep the old shape."""
+    model = (model or "").lower()
+    if "claude" not in model or _LEGACY_CLAUDE_OLD_NAMING.search(model):
+        return False
+    m = _LEGACY_CLAUDE_4.search(model)
+    if m is None:
+        return True
+    minor = m.group(1)
+    # No minor, or a date where the minor would be: plain Claude 4 (4.0).
+    if minor is None or len(minor) >= 8:
+        return False
+    return int(minor) > 6
 
 # Anthropic `error.type` values that are the request's fault, not the
 # vendor's — a retry or a fallback profile would fail the same way (#104).
@@ -704,7 +730,8 @@ class LLMClient:
             "x-api-key": self._resolve_api_key(),
             "anthropic-version": ANTHROPIC_API_VERSION,
         }
-        if self.thinking != "off":
+        # Adaptive thinking interleaves without being asked (#107).
+        if self.thinking != "off" and not _current_claude_format(self.model):
             headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
         return headers
 
@@ -716,8 +743,20 @@ class LLMClient:
             "max_tokens": self.max_tokens,
             "stream": stream,
         }
+        if _current_claude_format(self.model):
+            # Current models 400 on `temperature` and on `type: enabled`
+            # (#107). Off sends no thinking key at all: Opus 5.5 rejects
+            # `disabled`, and these models think by default regardless.
+            if self.thinking != "off":
+                effort_map = {"on": "medium", "extended": "high"}
+                body["thinking"] = {"type": "adaptive"}
+                body["output_config"] = {
+                    "effort": effort_map.get(self.thinking, "medium")}
+            # A row the user set on this profile is still theirs to send.
+            if "temperature" in self.model_params:
+                body["temperature"] = self.model_params["temperature"]
         # Anthropic extended thinking requires temperature=1 and a budget
-        if self.thinking != "off":
+        elif self.thinking != "off":
             budget_map = {"on": 4096, "extended": 16384}
             budget = budget_map.get(self.thinking, 4096)
             body["temperature"] = 1

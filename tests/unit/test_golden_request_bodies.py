@@ -8,6 +8,11 @@ contract. Never regenerate them after the refactor starts. The driver
 now runs the refactored worker; the fixtures are still the pre-refactor
 bytes.
 
+One deliberate edit since: #107 took ``temperature`` out of the Anthropic
+bodies, because the made-up ``claude-x`` is not on the closed legacy list
+and so gets the current Claude format. Only that key was removed, by hand;
+nothing was regenerated.
+
 Regenerate (only before the refactor):
     FREECAD_AI_WRITE_GOLDEN=1 env PYTHONPATH= .venv/bin/pytest \
         tests/unit/test_golden_request_bodies.py
