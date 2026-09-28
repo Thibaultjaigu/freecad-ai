@@ -16,7 +16,7 @@ import re
 from .compat import QtWidgets, QtCore
 from ..i18n import translate, QT_TRANSLATE_NOOP
 from ..config import PROVIDER_PRESETS, ProviderConfig
-from ..llm.providers import get_provider_names
+from ..llm.providers import get_api_style, get_provider_names
 
 QWidget = QtWidgets.QWidget
 QVBoxLayout = QtWidgets.QVBoxLayout
@@ -39,6 +39,13 @@ _URL_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
 # The Behavior page's "Compact above" spin starts here too. Applied only to
 # values typed on this page, so a smaller hand edit in config.json survives.
 _COMPACT_ABOVE_FLOOR = 4000
+
+# Suggestions only (#108): anything typed is saved and sent as-is, so a
+# level a vendor adds next year needs no release.
+_THINKING_SUGGESTIONS = {
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
+    "openai": ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+}
 
 
 class ProviderSection(QWidget):
@@ -216,6 +223,21 @@ class ProviderSection(QWidget):
         provider_layout.addRow(translate("SettingsDialog", "Compact above:"),
                                self.compact_above_spin)
 
+        # Thinking for this profile's model (#108). Editable: the list is
+        # suggestions, and whatever is typed goes to the vendor verbatim.
+        self.thinking_combo = QtWidgets.QComboBox()
+        self.thinking_combo.setEditable(True)
+        self.thinking_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.thinking_combo.setToolTip(
+            translate("SettingsDialog",
+                      "Sent to the vendor as-is. Anthropic: a level uses "
+                      "adaptive thinking, a number is a token budget.\n"
+                      "Use Test Connection to check a value."))
+        provider_layout.addRow(translate("SettingsDialog", "Thinking:"),
+                               self.thinking_combo)
+        self._global_thinking = "off"
+        self._fill_thinking_combo("anthropic")
+
         provider_group.setLayout(provider_layout)
         layout.addWidget(provider_group)
 
@@ -283,6 +305,8 @@ class ProviderSection(QWidget):
         """
         self._pending_rerank = None
         self._pending_rerank_label = None
+        # Named in the "Use global" row's tooltip.
+        self._global_thinking = cfg.thinking
         self._profiles = copy.deepcopy(cfg.profiles)
         self._active_profile = cfg.active_profile
         self._utility_profiles = dict(cfg.utility_profiles)
@@ -622,6 +646,44 @@ class ProviderSection(QWidget):
             if _URL_PLACEHOLDER_RE.search(
                 getattr(prof, "base_url", "") or ""))
 
+    def _fill_thinking_combo(self, api_style: str) -> None:
+        """Rebuild the suggestions for an API style, keeping the text."""
+        combo = self.thinking_combo
+        text = combo.currentText()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(translate("SettingsDialog", "Use global"))
+            combo.setItemData(
+                0, translate("SettingsDialog", "Currently: %s")
+                % self._global_thinking, QtCore.Qt.ToolTipRole)
+            combo.addItem(translate("SettingsDialog", "Model default"))
+            combo.addItem("off")
+            for level in _THINKING_SUGGESTIONS.get(
+                    api_style, _THINKING_SUGGESTIONS["openai"]):
+                combo.addItem(level)
+            if text:
+                combo.setEditText(text)
+        finally:
+            combo.blockSignals(False)
+
+    def _show_thinking(self, value) -> None:
+        if value is None:
+            self.thinking_combo.setCurrentIndex(0)
+        elif value == "default":
+            self.thinking_combo.setCurrentIndex(1)
+        else:
+            self.thinking_combo.setEditText(value)
+
+    def _thinking_value(self):
+        """The combo's value as stored: None, "default" or the typed text."""
+        text = self.thinking_combo.currentText().strip()
+        if not text or text == self.thinking_combo.itemText(0):
+            return None
+        if text == self.thinking_combo.itemText(1):
+            return "default"
+        return text
+
     def _update_vision_ui(self, profile):
         """Update vision checkbox and label from one profile's state."""
         self._vision_override_value = profile.vision_override
@@ -708,6 +770,8 @@ class ProviderSection(QWidget):
                 prof.context_window = None
             else:
                 prof.context_window = max(typed, _COMPACT_ABOVE_FLOOR)
+        if hasattr(self, "thinking_combo"):
+            prof.thinking = self._thinking_value()
         # The Settings dialog writes its params table into prof.params
         # here; the preferences page has no table and leaves them alone.
         self.aboutToCommit.emit(prof)
@@ -768,6 +832,8 @@ class ProviderSection(QWidget):
         self._compact_shown_value = prof.context_window
         self.compact_above_spin.setValue(prof.context_window or 0)
         self._compact_shown = self.compact_above_spin.value()
+        self._fill_thinking_combo(get_api_style(prof.name))
+        self._show_thinking(prof.thinking)
 
         is_active = label == self._active_profile
         # blockSignals, or populating the widgets would itself re-point
@@ -810,6 +876,8 @@ class ProviderSection(QWidget):
         # The dialog reloads its params table here, before the commit
         # below writes the table back.
         self.presetApplied.emit(preset)
+        # New vendor, new suggestions; the typed value stays (#108).
+        self._fill_thinking_combo(get_api_style(names[index]))
         # A vendor switch is an explicit "point this profile
         # elsewhere", so record it. Only a user-driven change reaches
         # here: programmatic index moves are wrapped in blockSignals.

@@ -72,8 +72,9 @@ WIKI_IMAGE = {
 RECORDED = {
     "LLM Provider": {
         # spins: 1 -- "Compact above" joined the group in #103.
+        # combos: 3 -- the editable "Thinking" combo joined it in #108.
         "checkboxes": ("Use this profile for chat", "Model supports vision"),
-        "combos": 2, "spins": 1, "fields": 3, "buttons": 4},
+        "combos": 3, "spins": 1, "fields": 3, "buttons": 4},
     "Utility models": {
         # buttons: 1, not 0 -- Test Reranker moved into this group, beside
         # the Reranker dropdown it tests, in #101's Task 7.
@@ -152,12 +153,14 @@ def dialog(qapp, tmp_config_dir):
 def _fields(group):
     """Text boxes the user types in.
 
-    Every spin box owns an internal QLineEdit, so an unfiltered count
+    Every spin box owns an internal QLineEdit, and so does an editable
+    combo (the per-profile Thinking row, #108), so an unfiltered count
     silently means "real fields plus spin boxes" -- a number nobody could
     reconcile with the picture.
     """
     return [e for e in group.findChildren(QtWidgets.QLineEdit)
-            if not isinstance(e.parent(), QtWidgets.QAbstractSpinBox)]
+            if not isinstance(e.parent(), (QtWidgets.QAbstractSpinBox,
+                                           QtWidgets.QComboBox))]
 
 
 def _inventory(group):
