@@ -909,6 +909,7 @@ class ChatDockWidget(QDockWidget):
         self._worker = None
         self._detached_workers = []  # stopped but still running (#104)
         self._last_worker = None     # Save Log after a detach (#104)
+        self._detach_pending = {}    # detach timer -> the worker it is for
         self._turn_open = False      # a worker's turn is in flight
         self._turn_notes = []        # this turn's fallback notes
         self._turn_start = None      # first message index of this turn
@@ -1560,9 +1561,20 @@ class ChatDockWidget(QDockWidget):
         self._continue_send()
 
     def _schedule_detach(self, worker):
-        # ``self`` as context: the timer dies with the dock.
-        QtCore.QTimer.singleShot(_DETACH_AFTER_MS, self,
-                                 lambda: self._detach_if_stuck(worker))
+        # A child timer dies with the dock under PySide2 and PySide6; the
+        # singleShot(ms, context, fn) overload is not in every binding.
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._on_detach_timeout)
+        self._detach_pending[timer] = worker
+        timer.start(_DETACH_AFTER_MS)
+
+    def _on_detach_timeout(self):
+        timer = self.sender()
+        worker = self._detach_pending.pop(timer, None)
+        if worker is not None:
+            self._detach_if_stuck(worker)
+        timer.deleteLater()
 
     def _detach_if_stuck(self, worker):
         """Stop was pressed and ``worker`` is still inside a request that

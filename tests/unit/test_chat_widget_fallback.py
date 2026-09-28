@@ -456,13 +456,29 @@ def test_a_thread_that_ended_during_the_detach_is_released():
     worker.deleteLater.assert_called_once()
 
 
-def test_the_detach_timer_dies_with_the_dock(monkeypatch):
-    timer = MagicMock()
-    monkeypatch.setattr(cw, "QtCore", SimpleNamespace(QTimer=timer))
-    fake = SimpleNamespace(_detach_if_stuck=MagicMock())
+def test_the_detach_timer_is_a_child_of_the_dock(monkeypatch):
+    """A child QTimer dies with the dock, under PySide2 and PySide6; the
+    singleShot(ms, context, fn) overload is not in every binding."""
+    timer_cls = MagicMock()
+    monkeypatch.setattr(cw, "QtCore", SimpleNamespace(QTimer=timer_cls))
+    fake = SimpleNamespace(_detach_pending={}, _on_detach_timeout=MagicMock())
     worker = object()
     W._schedule_detach(fake, worker)
-    ms, context, fn = timer.singleShot.call_args[0]
-    assert (ms, context) == (cw._DETACH_AFTER_MS, fake)
-    fn()
-    fake._detach_if_stuck.assert_called_once_with(worker)
+    timer_cls.assert_called_once_with(fake)
+    timer = timer_cls.return_value
+    timer.setSingleShot.assert_called_once_with(True)
+    timer.timeout.connect.assert_called_once_with(fake._on_detach_timeout)
+    timer.start.assert_called_once_with(cw._DETACH_AFTER_MS)
+    assert fake._detach_pending == {timer: worker}
+
+
+def test_the_detach_timeout_detaches_its_own_worker():
+    first, second = MagicMock(), MagicMock()
+    w1, w2 = object(), object()
+    fake = SimpleNamespace(_detach_pending={first: w1, second: w2},
+                           _detach_if_stuck=MagicMock(),
+                           sender=lambda: second)
+    W._on_detach_timeout(fake)
+    fake._detach_if_stuck.assert_called_once_with(w2)
+    assert fake._detach_pending == {first: w1}
+    second.deleteLater.assert_called_once()
