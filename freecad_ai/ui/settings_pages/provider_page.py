@@ -604,7 +604,10 @@ class ProviderPage(SettingsPage):
             # The params table supplies the dialog's own temperature and
             # outranks this inside LLMClient; cfg is only the fallback.
             temperature=get_config().temperature,
-            thinking=get_config().thinking,
+            # The profile's own value if it has one (#108), so a level the
+            # model refuses shows the vendor's error here, not mid-chat.
+            thinking=(profile.thinking if profile.thinking is not None
+                      else get_config().thinking),
             parent=QtWidgets.QApplication.instance(),
         )
         self._test_thread.finished.connect(self._on_test_finished)
