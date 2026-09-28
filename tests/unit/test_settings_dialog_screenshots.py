@@ -46,17 +46,20 @@ from freecad_ai.ui.settings_dialog import SettingsDialog  # noqa: E402
 # A group in two shots means both have to be retaken. Retaken 2026-09-27
 # for #101's four-page split: the three shots are equal-sized scroll tiles
 # over the one scrollable dialog, so a group whose box straddles a tile
-# boundary lands in both neighbouring shots.
+# boundary lands in both neighbouring shots. Retaken 2026-09-28 for #104's
+# fallback group, which pushed Behavior wholly into the second shot and
+# Skills wholly into the third.
 WIKI_IMAGE = {
     "LLM Provider": ("settings-dialog.png",),
     "Utility models": ("settings-dialog.png",),
+    "Fallback when the chat model can't be reached": ("settings-dialog.png",),
     "Model Parameters": ("settings-dialog.png",),
     "Limits": ("settings-dialog.png", "settings-dialog-2.png"),
-    "Behavior": ("settings-dialog.png", "settings-dialog-2.png"),
+    "Behavior": ("settings-dialog-2.png",),
     "System Prompt": ("settings-dialog-2.png",),
     "Tool Reranking": ("settings-dialog-2.png",),
     "User Tools": ("settings-dialog-2.png", "settings-dialog-3.png"),
-    "Skills": ("settings-dialog-2.png", "settings-dialog-3.png"),
+    "Skills": ("settings-dialog-3.png",),
     "Hooks": ("settings-dialog-3.png",),
     "Editor": ("settings-dialog-3.png",),
     "MCP Servers": ("settings-dialog-3.png",),
@@ -75,6 +78,10 @@ RECORDED = {
         # buttons: 1, not 0 -- Test Reranker moved into this group, beside
         # the Reranker dropdown it tests, in #101's Task 7.
         "checkboxes": (), "combos": 4, "spins": 0, "fields": 0, "buttons": 1},
+    "Fallback when the chat model can't be reached": {
+        # The list itself is a QListWidget, not counted; the combo picks
+        # the profile that Add appends, then Add / Remove / Up / Down (#104).
+        "checkboxes": (), "combos": 1, "spins": 0, "fields": 0, "buttons": 4},
     "Model Parameters": {
         # spins: 0, not 4 -- the four spin boxes moved into BehaviorPage's
         # own Limits group in #101's Task 6.
