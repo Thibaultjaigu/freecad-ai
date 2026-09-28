@@ -69,14 +69,24 @@ class FallbackWalker:
             i for i in range(len(self.chain)) if self._missing(i) is None)
 
     def _missing(self, i):
-        """The capability profile ``i`` lacks for this turn, or None."""
+        """Why profile ``i`` can't be tried this turn, or None.
+
+        ``self.chain`` is fixed at construction, but ``self.cfg.profiles`` is
+        the live dict Settings can replace mid-turn, so a label that was
+        valid when the chain was built may be gone by the time the cursor
+        reaches it (#104). That reads the same as a capability gap: skipped,
+        logged, recorded, never handed to ``create_client``.
+        """
         if i == 0:
             return None          # the turn was prepared for it
-        profile = self.cfg.profiles[self.chain[i]]
+        label = self.chain[i]
+        if label not in self.cfg.profiles:
+            return "profile removed"
+        profile = self.cfg.profiles[label]
         if self._needs["tools"] and not profile_supports_tools(profile):
-            return "tools"
+            return "no tools"
         if self._needs["vision"] and not profile_supports_vision(profile):
-            return "vision"
+            return "no vision"
         return None
 
     def _client(self, i):
@@ -103,12 +113,12 @@ class FallbackWalker:
             if self._is_interrupted():
                 return None
             i, label = self.cursor, self.chain[self.cursor]
-            cap = self._missing(i)
-            if cap:
-                logger.warning("FreeCAD AI: %s skipped — no %s", label, cap)
-                self._record(round_no, label, "skipped", f"no {cap}")
-                self._segments.append(f"{label} skipped (no {cap})")
-                self._failures.append(f"{label}: skipped (no {cap})")
+            reason = self._missing(i)
+            if reason:
+                logger.warning("FreeCAD AI: %s skipped — %s", label, reason)
+                self._record(round_no, label, "skipped", reason)
+                self._segments.append(f"{label} skipped ({reason})")
+                self._failures.append(f"{label}: skipped ({reason})")
                 self.cursor += 1
                 continue
             client = self._client(i)

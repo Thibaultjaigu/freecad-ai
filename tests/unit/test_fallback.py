@@ -287,3 +287,39 @@ class TestWalk:
         assert list(events) == ["e"]
         assert [a["outcome"] for a in walker.attempts] == ["failed", "answered"]
 
+    def test_a_profile_deleted_mid_turn_is_skipped_not_a_crash(self, caplog):
+        cfg = _cfg(["b", "c"])
+        walker, made, p = _walker(cfg)
+        try:
+            del cfg.profiles["b"]
+            with caplog.at_level(logging.WARNING):
+                client, events = walker.open(
+                    0, _request({"chat": REFUSED, "c": ["e"]}))
+        finally:
+            p.stop()
+        assert client.label == "c"
+        assert list(events) == ["e"]
+        assert "b" not in made
+        assert "FreeCAD AI: b skipped — profile removed" in caplog.text
+        assert walker.attempts == [
+            {"round": 0, "profile": "chat", "outcome": "failed",
+             "error": "connection refused"},
+            {"round": 0, "profile": "b", "outcome": "skipped",
+             "error": "profile removed"},
+            {"round": 0, "profile": "c", "outcome": "answered", "error": ""},
+        ]
+
+    def test_every_candidate_deleted_after_the_active_one_still_raises_cleanly(self):
+        """_last_eligible must not crash when every fallback label is gone."""
+        cfg = _cfg(["b", "c"])
+        walker, made, p = _walker(cfg)
+        try:
+            del cfg.profiles["b"]
+            del cfg.profiles["c"]
+            with pytest.raises(LLMError) as info:
+                walker.open(0, _request({"chat": REFUSED}))
+        finally:
+            p.stop()
+        assert made == [None]
+        assert "b: skipped (profile removed)" in str(info.value)
+        assert "c: skipped (profile removed)" in str(info.value)
