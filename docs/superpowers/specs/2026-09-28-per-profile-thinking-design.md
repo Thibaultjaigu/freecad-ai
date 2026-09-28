@@ -111,8 +111,10 @@ Notes:
   word on a legacy Claude model sends `adaptive` + `effort`, and Haiku
   4.5 answers with a 400. That is decision 1 — the user sees the message
   and picks a budget number instead.
-- An explicit `temperature` row in the profile's params is still sent in
-  every case (#107's rule).
+- An explicit `temperature` row in the profile's params is still sent
+  (#107's rule), except with `type: enabled` thinking (a budget number,
+  or `on`/`extended` on a legacy id), which Anthropic requires to run at
+  temperature 1 — exactly as today.
 - Verbatim values are sent with tools because a user who set a level on
   the profile meant it for Act mode too. The global `on` / `extended`
   keep today's "not with tools" rule, so upgrades change nothing.
