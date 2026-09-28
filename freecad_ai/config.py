@@ -398,6 +398,10 @@ class ProviderConfig:
     # Client-side only — never sent to a vendor. None = use the global
     # AppConfig.context_window (#103).
     context_window: int | None = None
+    # Thinking for this profile's model, sent to the vendor as typed (#108).
+    # None = use the global AppConfig.thinking. "default" sends no thinking
+    # field at all; "off"/"on"/"extended" mean what they mean globally.
+    thinking: str | None = None
 
     CAPABILITY_FIELDS = ("vision_detected", "vision_override",
                          "tools_detected", "thinking_detected")
@@ -438,6 +442,15 @@ def _profile_from_dict(raw) -> "ProviderConfig":
             "Profile context_window %s is not a positive integer — using "
             "the global value instead.", json.dumps(cw, default=str))
         kept["context_window"] = None
+    th = kept.get("thinking")
+    if th is not None:
+        if not isinstance(th, str):
+            logger.warning(
+                "Profile thinking %s is not a string — using the global "
+                "value instead.", json.dumps(th, default=str))
+            kept["thinking"] = None
+        else:
+            kept["thinking"] = th.strip() or None
     return ProviderConfig(**kept)
 
 
