@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import time
+from html import escape as _html_escape
 
 from .compat import QtWidgets, QtCore, QtGui
 from ..i18n import translate
@@ -58,6 +59,10 @@ from .code_review_dialog import CodeReviewDialog
 
 
 logger = logging.getLogger(__name__)
+
+# Stop, then this long with the worker still inside a request that
+# ignores interruption: the widget stops waiting for it (#104).
+_DETACH_AFTER_MS = 2000
 
 
 # Known binary file magic bytes — prevents misdetecting binary files as text
@@ -860,6 +865,20 @@ class _AttachmentStrip(QtWidgets.QWidget):
 class ChatDockWidget(QDockWidget):
     """Main chat dock widget for FreeCAD AI."""
 
+    # Every worker signal and the slot it drives. _start_worker connects
+    # these; a detach disconnects the same list (#104).
+    _WORKER_SLOTS = (
+        ("token_received", "_on_token"),
+        ("thinking_received", "_on_thinking"),
+        ("response_finished", "_on_response_finished"),
+        ("error_occurred", "_on_error"),
+        ("tool_call_started", "_on_tool_call_started"),
+        ("tool_call_finished", "_on_tool_call_finished"),
+        ("tool_exec_requested", "_execute_tool_call"),
+        ("vision_note", "_on_vision_note"),
+        ("fallback_note", "_on_fallback_note"),
+    )
+
     def __init__(self, parent=None):
         super().__init__(translate("ChatDockWidget", "FreeCAD AI"), parent)
         self.setObjectName("FreeCADAIChatDock")
@@ -867,6 +886,7 @@ class ChatDockWidget(QDockWidget):
 
         self.conversation = Conversation()
         self._worker = None
+        self._detached_workers = []  # stopped but still running (#104)
         self._input_history = InputHistory()
         self._suppress_history_reset = False  # set True around programmatic
                                               # _set_input_text() to guard a
@@ -1432,6 +1452,7 @@ class ChatDockWidget(QDockWidget):
             # of sending. Input is usually empty here, so this must run before
             # the empty-text guard below.
             self._worker.requestInterruption()
+            self._schedule_detach(self._worker)
             return
 
         text = self.input_edit.toPlainText().strip()
@@ -1512,6 +1533,41 @@ class ChatDockWidget(QDockWidget):
             return
 
         self._continue_send()
+
+    def _schedule_detach(self, worker):
+        QtCore.QTimer.singleShot(_DETACH_AFTER_MS,
+                                 lambda: self._detach_if_stuck(worker))
+
+    def _detach_if_stuck(self, worker):
+        """Stop was pressed and ``worker`` is still inside a request that
+        ignores interruption -- a connect or read that only returns at its
+        timeout, up to 300 s. Let it finish unheard and give the user the
+        input back now (#104)."""
+        if worker is not self._worker or not worker.isRunning():
+            return
+        for signal, _ in ChatDockWidget._WORKER_SLOTS:
+            try:
+                getattr(worker, signal).disconnect()
+            except (RuntimeError, TypeError):
+                pass       # nothing connected
+        worker.detach()
+        # A running QThread must never be destroyed: hold it until it ends.
+        self._detached_workers.append(worker)
+        worker.finished.connect(lambda: self._release_detached(worker))
+        self._store_tool_results(worker._full_response)
+        self.conversation.save()
+        self._worker = None
+        self._set_loading(False)
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml("</div></div>")
+        self._append_html(render_message(
+            "system", translate("ChatDockWidget", "⏹ Stopped")))
+
+    def _release_detached(self, worker):
+        if worker in self._detached_workers:
+            self._detached_workers.remove(worker)
+        worker.deleteLater()
 
     def _on_image_added(self, media_type: str, base64_data: str):
         """Handle image added via paste or drop."""
@@ -1989,8 +2045,7 @@ class ChatDockWidget(QDockWidget):
         # Ollama embedding/reranker accidentally selected as the main model
         # won't get tools sent to it.
         use_tools = cfg.enable_tools and mode == "act" and cfg.supports_tools
-        tools_schema = None
-        api_style = "openai"
+        filter_names = None
 
         if use_tools:
             # Connect MCP servers on first tool-enabled send
@@ -1998,7 +2053,6 @@ class ChatDockWidget(QDockWidget):
                 self._connect_mcp_servers(cfg)
 
             from ..tools.setup import create_default_registry
-            from ..llm.providers import get_api_style
 
             # Build extra tools for active optimization
             extra_tools = []
@@ -2037,11 +2091,9 @@ class ChatDockWidget(QDockWidget):
                 from ..mcp.manager import find_vision_fallback
                 self._vision_fallback_tool = find_vision_fallback(self._tool_registry)
                 self._refresh_image_controls()
-            api_style = get_api_style(cfg.provider.name)
 
             # Optional tool reranking: filter schemas down to the top-N
             # relevant tools (+ pinned) based on the latest user message.
-            filter_names = None
             if cfg.rerank_method in ("keyword", "llm"):
                 user_text = _extract_latest_user_text(self.conversation)
                 pairs = self._tool_registry.list_name_description_pairs()
@@ -2057,10 +2109,6 @@ class ChatDockWidget(QDockWidget):
                 except Exception:
                     pass
 
-            if api_style == "anthropic":
-                tools_schema = self._tool_registry.to_anthropic_schema(filter_names)
-            else:
-                tools_schema = self._tool_registry.to_openai_schema(filter_names)
             system_prompt = build_system_prompt(
                 mode=mode, tools_enabled=True,
                 override=cfg.system_prompt_override,
@@ -2073,7 +2121,6 @@ class ChatDockWidget(QDockWidget):
 
         # Build describe_fn for non-vision LLMs
         describe_fn = None
-        conversation_ref = None
         if not cfg.supports_vision:
             fallback = getattr(self, '_vision_fallback_tool', None)
             if fallback and self._tool_registry:
@@ -2089,16 +2136,11 @@ class ChatDockWidget(QDockWidget):
                         raise RuntimeError(result.error or "describe_image failed")
                     return describe
                 describe_fn = _make_describe(_reg, _tool)
-                conversation_ref = self.conversation
 
-        # Get messages for API
-        from ..llm.client import should_strip_thinking
-        strip = should_strip_thinking(
-            cfg.provider.model, cfg.strip_thinking_history)
         # When the model has no vision and no describe_image fallback is
         # available, drop history image blocks to a placeholder so they aren't
         # sent raw to a provider that would reject them (issue #30). When a
-        # describe_fn exists, the worker rebuilds messages with descriptions.
+        # describe_fn exists, the worker renders descriptions per request.
         strip_images = not cfg.supports_vision and describe_fn is None
         # Prompt caching (#47): the document state was deliberately left out
         # of the system prompt so the prefix stays byte-identical between
@@ -2106,7 +2148,7 @@ class ChatDockWidget(QDockWidget):
         # delivered at the tail where changing it invalidates nothing ahead
         # of it -- and so every earlier turn renders the bytes it was
         # already sent with. Recording rather than grafting also means the
-        # worker's vision-fallback re-render (see _LLMWorker.run) keeps it.
+        # worker's vision-fallback re-render (see _LLMWorker._request) keeps it.
         if cfg.optimize_prompt_caching:
             from ..core.system_prompt import build_document_context_block
             self.conversation.attach_document_context(
@@ -2114,10 +2156,26 @@ class ChatDockWidget(QDockWidget):
         else:
             self.conversation.clear_document_context()
 
-        messages = self.conversation.get_messages_for_api(
-            api_style=api_style, strip_images=strip_images, strip_thinking=strip)
+        # The window is fixed for the whole turn so later tool rounds don't
+        # drop older messages from under the prompt cache (#104, #47).
+        start_index = self.conversation.window_start()
+        self._start_worker(
+            self.conversation, system_prompt,
+            registry=self._tool_registry, filter_names=filter_names,
+            describe_fn=describe_fn, strip_images=strip_images,
+            start_index=start_index,
+            needs_vision=ChatDockWidget._needs_vision(
+                cfg, self.conversation, start_index))
 
-        # Start streaming
+    @staticmethod
+    def _needs_vision(cfg, conversation, start_index) -> bool:
+        """Raw images go out only when the chat profile has vision; then
+        a fallback without vision must be skipped (#104)."""
+        return bool(cfg.supports_vision
+                    and conversation.has_images(start_index))
+
+    def _start_worker(self, conversation, system_prompt, **worker_kwargs):
+        """Open the AI bubble and start a worker on ``conversation``."""
         self._set_loading(True)
         self._streaming_html = ""
         self._append_html(
@@ -2126,24 +2184,13 @@ class ChatDockWidget(QDockWidget):
             '<div style="font-weight: bold; color: #2e7d32; margin-bottom: 4px;">AI</div>'
             '<div style="white-space: pre-wrap;">'
         )
-
         self._in_thinking = False
         self._tool_results_stored = False
         self._summary_rendered = False
-        self._worker = _LLMWorker(
-            messages, system_prompt,
-            tools=tools_schema, registry=self._tool_registry,
-            api_style=api_style, conversation=conversation_ref,
-            describe_fn=describe_fn, parent=self,
-        )
-        self._worker.token_received.connect(self._on_token)
-        self._worker.thinking_received.connect(self._on_thinking)
-        self._worker.response_finished.connect(self._on_response_finished)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.tool_call_started.connect(self._on_tool_call_started)
-        self._worker.tool_call_finished.connect(self._on_tool_call_finished)
-        self._worker.tool_exec_requested.connect(self._execute_tool_call)
-        self._worker.vision_note.connect(self._on_vision_note)
+        self._worker = _LLMWorker(conversation, system_prompt, parent=self,
+                                  **worker_kwargs)
+        for signal, slot in ChatDockWidget._WORKER_SLOTS:
+            getattr(self._worker, signal).connect(getattr(self, slot))
         self._worker.start()
 
     def _save_session_log(self):
@@ -2174,6 +2221,8 @@ class ChatDockWidget(QDockWidget):
         # Also include the last worker's tool results if available
         if self._worker and hasattr(self._worker, "_tool_results") and self._worker._tool_results:
             log_data["tool_trace"] = self._worker._tool_results
+        if self._worker and getattr(self._worker, "fallback_attempts", None):
+            log_data["fallback_attempts"] = self._worker.fallback_attempts
 
         try:
             with open(filepath, "w") as f:
@@ -2532,6 +2581,14 @@ class ChatDockWidget(QDockWidget):
             f'{message}</div>'
         )
 
+    def _on_fallback_note(self, text: str):
+        """Show which profile answered after a failover (#104). Display
+        only: never stored, so it never reaches a model."""
+        self._append_html(
+            '<div style="color: #888; font-size: 9pt; margin: 2px 12px;">'
+            f'{_html_escape(text)}</div>'
+        )
+
     @Slot(str, str)
     def _execute_tool_call(self, tool_name, arguments_json):
         """Execute a tool call on the main thread. Connected to worker's tool_exec_requested signal."""
@@ -2621,14 +2678,11 @@ class ChatDockWidget(QDockWidget):
         self._append_html(render_message("system", error_msg))
 
         from ..core.system_prompt import build_system_prompt
-        from ..llm.client import should_strip_thinking
         mode = "plan" if self.mode_combo.currentIndex() == 0 else "act"
         cfg = get_config()
         system_prompt = build_system_prompt(
             mode=mode,
             include_document_context=not cfg.optimize_prompt_caching)
-        strip = should_strip_thinking(
-            cfg.provider.model, cfg.strip_thinking_history)
         # Same tail delivery as the main send path (#47). The turn being
         # re-sent is the [System] error message added just above.
         if cfg.optimize_prompt_caching:
@@ -2639,25 +2693,16 @@ class ChatDockWidget(QDockWidget):
             self.conversation.clear_document_context()
 
         # This retry attached a viewport snapshot above; drop history images
-        # for non-vision models so they aren't sent raw (issue #30).
-        messages = self.conversation.get_messages_for_api(
-            strip_images=not cfg.supports_vision, strip_thinking=strip)
-
-        self._set_loading(True)
-        self._streaming_html = ""
-        self._append_html(
-            '<div style="margin: 8px 0; padding: 8px 12px; '
-            'background-color: #f5f5f5; border-radius: 6px;">'
-            '<div style="font-weight: bold; color: #2e7d32; margin-bottom: 4px;">AI</div>'
-            '<div style="white-space: pre-wrap;">'
-        )
-
-        self._tool_results_stored = False
-        self._worker = _LLMWorker(messages, system_prompt, parent=self)
-        self._worker.token_received.connect(self._on_token)
-        self._worker.response_finished.connect(self._on_response_finished)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.start()
+        # for non-vision models so they aren't sent raw (issue #30). The
+        # worker renders the turn for whichever profile answers, like the
+        # main send path -- this used to render OpenAI style from
+        # cfg.provider.model whatever the vendor (#104).
+        start_index = self.conversation.window_start()
+        self._start_worker(
+            self.conversation, system_prompt,
+            strip_images=not cfg.supports_vision, start_index=start_index,
+            needs_vision=ChatDockWidget._needs_vision(
+                cfg, self.conversation, start_index))
 
     def execute_code_from_plan(self, code):
         """Execute a code block from Plan mode (called from Execute button)."""
