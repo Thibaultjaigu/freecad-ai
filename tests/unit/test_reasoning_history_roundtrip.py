@@ -5,9 +5,10 @@ The document snapshot was one way to break it; ``reasoning_content`` is
 another, in the opposite direction -- bytes that were sent and then
 *disappeared*.
 
-``_LLMWorker._tool_loop`` copies the rendered messages into a local list
-and appends ``reasoning_content`` to each assistant turn (Kimi-K2.5
-requires the thinking to be echoed back). What gets written into the
+``_LLMWorker._tool_loop`` records each round on a working copy of the
+conversation and re-renders it per request (#104), echoing
+``reasoning_content`` on each assistant turn (Kimi-K2.5 requires the
+thinking to be echoed back). What gets written into the
 ``Conversation`` afterwards is built from ``_tool_results``, which carried
 only the text and the tool calls -- so the next user turn re-rendered the
 previous turn *without* the thinking the provider had already seen. The

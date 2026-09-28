@@ -316,3 +316,36 @@ class TestOutputCapResolution:
         cfg.utility_profiles["compaction"] = "local"
         assert create_client(cfg, "compaction").max_tokens == 2000
         assert create_client(cfg).max_tokens == cfg.max_tokens
+
+
+class TestCreateClientForAProfile:
+    """#104: the fallback walker asks for a profile by label."""
+
+    def _cfg(self):
+        from freecad_ai.config import AppConfig, ProviderConfig
+        c = AppConfig()
+        c.profiles = {
+            "chat": ProviderConfig(name="anthropic", model="m-chat",
+                                   base_url="https://api.anthropic.com"),
+            "backup": ProviderConfig(name="ollama", model="m-backup",
+                                     base_url="http://localhost:11434/v1",
+                                     params={"max_tokens": 1234}),
+        }
+        c.active_profile = "chat"
+        return c
+
+    def test_profile_builds_that_profile(self):
+        from freecad_ai.llm.client import create_client
+        client = create_client(self._cfg(), profile="backup",
+                               cache_key="conv_1")
+        assert (client.provider_name, client.model) == ("ollama", "m-backup")
+        assert client.max_tokens == 1234
+        assert client.cache_key == "conv_1"
+
+    def test_no_profile_is_todays_chat_client(self):
+        from freecad_ai.llm.client import create_client
+        assert create_client(self._cfg()).model == "m-chat"
+
+    def test_an_unknown_profile_falls_back_to_the_active_one(self):
+        from freecad_ai.llm.client import create_client
+        assert create_client(self._cfg(), profile="gone").model == "m-chat"

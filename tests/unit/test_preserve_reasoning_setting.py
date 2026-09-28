@@ -106,8 +106,8 @@ class TestTheWorkerActuallyConsultsIt:
     on, so a call site that forgets to pass it keeps working -- and unticking
     the box would silently do nothing."""
 
-    def test_run_resolves_the_flag_from_the_config(self):
-        src = inspect.getsource(cw._LLMWorker.run)
+    def test_apply_client_resolves_the_flag_from_the_config(self):
+        src = inspect.getsource(cw._LLMWorker._apply_client)
 
         assert "preserve_reasoning_history" in src
 

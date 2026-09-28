@@ -31,6 +31,7 @@ QLabel = QtWidgets.QLabel
 QMessageBox = QtWidgets.QMessageBox
 QInputDialog = QtWidgets.QInputDialog
 QSpinBox = QtWidgets.QSpinBox
+QListWidget = QtWidgets.QListWidget
 Signal = QtCore.Signal
 
 _URL_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
@@ -90,6 +91,7 @@ class ProviderSection(QWidget):
         self._profiles = {}
         self._active_profile = ""
         self._utility_profiles = {}
+        self._fallback_profiles = []
         self._current_profile_label = None
         self._baseline = None
         self._pending_rerank = None
@@ -238,6 +240,37 @@ class ProviderSection(QWidget):
         self.utility_group.setLayout(util_form)
         layout.addWidget(self.utility_group)
 
+        # ── Fallback ────────────────────────────────────────────────
+        # One global ordered list, walked once per turn after the chat
+        # profile fails to answer (#104).
+        self.fallback_group = QGroupBox(translate(
+            "SettingsDialog", "Fallback when the chat model can't be reached"))
+        self.fallback_group.setToolTip(translate(
+            "SettingsDialog",
+            "Tried once, in this order, after the chat profile fails to "
+            "answer. A paid profile in this list is used without asking."))
+        fb_layout = QVBoxLayout()
+        self.fallback_list = QListWidget()
+        fb_layout.addWidget(self.fallback_list)
+        fb_row = QHBoxLayout()
+        self.fallback_picker = QComboBox()
+        fb_row.addWidget(self.fallback_picker, 1)
+        self.fallback_add_btn = QPushButton(translate("SettingsDialog", "Add"))
+        self.fallback_remove_btn = QPushButton(
+            translate("SettingsDialog", "Remove"))
+        self.fallback_up_btn = QPushButton(translate("SettingsDialog", "Up"))
+        self.fallback_down_btn = QPushButton(translate("SettingsDialog", "Down"))
+        for btn in (self.fallback_add_btn, self.fallback_remove_btn,
+                    self.fallback_up_btn, self.fallback_down_btn):
+            fb_row.addWidget(btn)
+        fb_layout.addLayout(fb_row)
+        self.fallback_group.setLayout(fb_layout)
+        layout.addWidget(self.fallback_group)
+        self.fallback_add_btn.clicked.connect(self._on_fallback_add)
+        self.fallback_remove_btn.clicked.connect(self._on_fallback_remove)
+        self.fallback_up_btn.clicked.connect(lambda: self._move_fallback(-1))
+        self.fallback_down_btn.clicked.connect(lambda: self._move_fallback(1))
+
     # ── Public interface ───────────────────────────────────────────
 
     def load(self, cfg, label=None):
@@ -253,6 +286,7 @@ class ProviderSection(QWidget):
         self._profiles = copy.deepcopy(cfg.profiles)
         self._active_profile = cfg.active_profile
         self._utility_profiles = dict(cfg.utility_profiles)
+        self._fallback_profiles = list(cfg.fallback_profiles)
         shown = label if label in self._profiles else self._active_profile
         # Set before the refresh, which selects the profile being edited.
         self._current_profile_label = shown
@@ -267,6 +301,7 @@ class ProviderSection(QWidget):
         cfg.active_profile = self._active_profile
         cfg.utility_profiles = self._collect_utility_profiles(
             self._utility_profiles)
+        cfg.fallback_profiles = list(self._fallback_profiles)
         # Factory defaults = off + 15. Checked on the *live* config: if the
         # Tools page saved an explicit reranker choice first, the pair is
         # no longer off/15 and the preset is skipped. If this runs first,
@@ -349,6 +384,7 @@ class ProviderSection(QWidget):
              for label, prof in self._profiles.items()},
             self._active_profile,
             self._collect_utility_profiles(self._utility_profiles),
+            list(self._fallback_profiles),
         )
 
     # ── Moved verbatim from SettingsDialog ─────────────────────────
@@ -382,6 +418,9 @@ class ProviderSection(QWidget):
         for utility, label in list(self._utility_profiles.items()):
             if label == old:
                 self._utility_profiles[utility] = new
+        # In place: callers and tests may hold this list.
+        self._fallback_profiles[:] = [
+            new if label == old else label for label in self._fallback_profiles]
 
     def _delete_profile(self, label: str) -> None:
         """Remove a profile, leaving nothing pointing at it."""
@@ -395,6 +434,8 @@ class ProviderSection(QWidget):
         for utility, mapped in list(self._utility_profiles.items()):
             if mapped == label:
                 self._utility_profiles[utility] = ""
+        self._fallback_profiles[:] = [
+            entry for entry in self._fallback_profiles if entry != label]
 
     def _refresh_profile_combo(self) -> None:
         """Repopulate the profile combo without firing its handler.
@@ -428,6 +469,7 @@ class ProviderSection(QWidget):
         finally:
             self.profile_combo.blockSignals(False)
         self._refresh_utility_combos()
+        self._refresh_fallback_widgets()
 
     def _refresh_utility_combos(self) -> None:
         """Repopulate every utility dropdown from the working copy.
@@ -449,6 +491,41 @@ class ProviderSection(QWidget):
                 combo.setCurrentIndex(idx if idx >= 0 else 0)
             finally:
                 combo.blockSignals(False)
+
+    def _refresh_fallback_widgets(self) -> None:
+        """Repopulate the fallback list and its picker from the working copy."""
+        row = self.fallback_list.currentRow()
+        self.fallback_list.clear()
+        for label in self._fallback_profiles:
+            self.fallback_list.addItem(label)
+        if 0 <= row < self.fallback_list.count():
+            self.fallback_list.setCurrentRow(row)
+        self.fallback_picker.clear()
+        for label in self._profiles:
+            if label not in self._fallback_profiles:
+                self.fallback_picker.addItem(label, label)
+
+    def _on_fallback_add(self) -> None:
+        label = self.fallback_picker.currentData()
+        if label and label not in self._fallback_profiles:
+            self._fallback_profiles.append(label)
+            self._refresh_fallback_widgets()
+            self.fallback_list.setCurrentRow(len(self._fallback_profiles) - 1)
+
+    def _on_fallback_remove(self) -> None:
+        row = self.fallback_list.currentRow()
+        if 0 <= row < len(self._fallback_profiles):
+            del self._fallback_profiles[row]
+            self._refresh_fallback_widgets()
+
+    def _move_fallback(self, step: int) -> None:
+        row = self.fallback_list.currentRow()
+        target = row + step
+        entries = self._fallback_profiles
+        if 0 <= row < len(entries) and 0 <= target < len(entries):
+            entries[row], entries[target] = entries[target], entries[row]
+            self._refresh_fallback_widgets()
+            self.fallback_list.setCurrentRow(target)
 
     def _on_utility_combo_changed(self, utility: str, index: int) -> None:
         """Track a utility dropdown's live selection in the working copy.

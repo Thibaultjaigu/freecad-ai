@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import time
+from html import escape as _html_escape
 
 from .compat import QtWidgets, QtCore, QtGui
 from ..i18n import translate
@@ -58,6 +59,43 @@ from .code_review_dialog import CodeReviewDialog
 
 
 logger = logging.getLogger(__name__)
+
+# Stop, then this long with the worker still inside a request that
+# ignores interruption: the widget stops waiting for it (#104).
+_DETACH_AFTER_MS = 2000
+
+# Worker threads still running when FreeCAD quits. Qt deletes a dock's
+# children at teardown, and destroying a running QThread is qFatal (exit
+# 134). A request blocked in connect or read can outlive the dock by
+# minutes, so it leaves the dock's ownership and is held here until the
+# process ends (#104).
+_KEEP_UNTIL_EXIT = []
+
+
+def _keep_until_exit(thread):
+    thread.setParent(None)
+    _KEEP_UNTIL_EXIT.append(thread)
+
+
+def _render_note(text):
+    """A small grey display-only line, e.g. which profile answered."""
+    return ('<div style="color: #888; font-size: 9pt; margin: 2px 12px;">'
+            f'{_html_escape(text)}</div>')
+
+
+def _attach_turn_notes(messages, turn_start, notes):
+    """Pin this turn's notes to the turn's last assistant message, so the
+    re-render (which rebuilds the pane from the messages) keeps them.
+    Display only: the API renderers build fresh dicts and never copy the
+    field (#104). Idempotent; moves the notes if a later message closes
+    the turn, e.g. the summary after an error."""
+    if not notes or turn_start is None:
+        return
+    replies = [m for m in messages[turn_start:] if m.get("role") == "assistant"]
+    for msg in replies:
+        msg.pop("notes", None)
+    if replies:
+        replies[-1]["notes"] = list(notes)
 
 
 # Known binary file magic bytes — prevents misdetecting binary files as text
@@ -183,11 +221,11 @@ def _extract_latest_user_text(conversation) -> str:
 class _LLMWorker(QThread):
     """Background thread that streams LLM responses with optional tool loop.
 
-    When tools are provided, implements an agentic loop:
+    When a registry is provided, implements an agentic loop:
       1. Stream LLM response, collecting text + tool calls
       2. If no tool calls -> done
       3. For each tool call, dispatch to main thread and wait for result
-      4. Append results to messages, loop back to step 1
+      4. Record the round on the turn's working copy, loop back to step 1
     """
 
     token_received = Signal(str)           # Text delta
@@ -198,17 +236,28 @@ class _LLMWorker(QThread):
     tool_call_finished = Signal(str, str, bool, str)  # (tool_name, call_id, success, output)
     tool_exec_requested = Signal(str, str) # (tool_name, arguments_json) — dispatches to main thread
     vision_note = Signal(str)              # Vision description status note
+    fallback_note = Signal(str)  # a fallback profile answered (#104)
 
-    def __init__(self, messages, system_prompt, tools=None, registry=None,
-                 api_style="openai", conversation=None, describe_fn=None, parent=None):
+    def __init__(self, conversation, system_prompt, *, registry=None,
+                 filter_names=None, describe_fn=None, strip_images=False,
+                 start_index=0, needs_vision=False, parent=None):
         super().__init__(parent)
-        self.messages = list(messages)
-        self.system_prompt = system_prompt
-        self.tools = tools
-        self.registry = registry
-        self.api_style = api_style
+        # The turn arrives neutral: no vendor format, no rendered messages.
+        # Each request is rendered for the client about to answer it,
+        # which after a fallback may be a different vendor (#104).
         self.conversation = conversation
+        self._work = conversation.fork_for_turn()
+        self.system_prompt = system_prompt
+        self.registry = registry
+        self.filter_names = filter_names
         self.describe_fn = describe_fn
+        self.strip_images = strip_images
+        self.start_index = start_index
+        self._needs_vision = needs_vision
+        self.api_style = "openai"  # the answering client's, set per request
+        self._detached = False
+        self.fallback_attempts = []
+        self._describe_cache = {}
         self._full_response = ""
         self._thinking_text = ""
         self._tool_results = []
@@ -216,49 +265,44 @@ class _LLMWorker(QThread):
         self._tool_result_wait = QtCore.QWaitCondition()
         self._pending_result = None
         self._max_tool_turns = get_config().max_tool_turns  # 0 = endless
-        self._strip_thinking = False  # resolved in run()
-        self._optimize_caching = False  # resolved in run()
-        self._preserve_reasoning = True  # resolved in run()
+        self._strip_thinking = False  # resolved per client in _apply_client
+        self._optimize_caching = False
+        self._preserve_reasoning = True
         self._final_reasoning = ""  # thinking of the turn that ends the run (#84)
         self._tool_timeline = []  # timing data for summary visualization
         self._response_truncated = False  # response hit the output-token limit
         self._response_max_tokens = None  # the cap the client ran with (#103)
 
+    def detach(self):
+        """The widget gave up on this run (Stop, then 2 s of silence).
+        From now on nothing leaves this thread (#104)."""
+        self._detached = True
+        self.requestInterruption()
+
+    def _emit(self, signal, *args):
+        if not self._detached:
+            signal.emit(*args)
+
     def run(self):
         try:
-            from ..llm.client import create_client_from_config, should_strip_thinking
             from ..config import get_config as _get_config
-            # Every request in one conversation carries the same cache key, so
-            # the provider can keep routing them to the cluster that already
-            # holds the prefix (#47). It is the conversation id, which outlives
-            # a save/load, because Moonshot asks for a value that survives
-            # leaving and resuming a session.
-            client = create_client_from_config(
-                cache_key=getattr(self.conversation, "conversation_id", ""))
-            # The truncation warning quotes this: the cap may come from a
-            # profile row, and cfg can change while the turn runs (#103).
-            self._response_max_tokens = client.max_tokens
-            self._strip_thinking = should_strip_thinking(
-                client.model, _get_config().strip_thinking_history)
-            self._optimize_caching = _get_config().optimize_prompt_caching
-            self._preserve_reasoning = _get_config().preserve_reasoning_history
-
-            # Re-format messages with image interception on worker thread
-            if self.conversation and self.describe_fn:
-                wrapped = self._wrap_describe_fn(self.describe_fn)
-                self.messages = self.conversation.get_messages_for_api(
-                    api_style=self.api_style, describe_fn=wrapped,
-                    strip_thinking=self._strip_thinking,
-                )
-
-            if not self.tools:
-                # Simple non-tool streaming (backward compat)
-                self._simple_stream(client)
-                return
-
-            # Agentic tool loop
-            self._tool_loop(client)
-
+            from ..llm.fallback import FallbackWalker
+            walker = FallbackWalker(
+                _get_config(),
+                # One cache key per conversation, whichever profile answers,
+                # so the provider keeps routing to the cluster that holds
+                # the prefix (#47). It used to reach the client only when a
+                # describe_fn was set.
+                cache_key=self.conversation.conversation_id,
+                needs_tools=self.registry is not None,
+                needs_vision=self._needs_vision,
+                is_interrupted=self.isInterruptionRequested,
+                on_note=lambda text: self._emit(self.fallback_note, text))
+            self.fallback_attempts = walker.attempts
+            if self.registry is None:
+                self._simple_stream(walker)
+            else:
+                self._tool_loop(walker)
         except Exception as e:
             # The bubble gets the short form; the Report view gets the
             # stack. #89 arrived as the bare line "'NoneType' object is
@@ -267,21 +311,64 @@ class _LLMWorker(QThread):
             # way to tell us which. A turn that dies is a bug report
             # waiting to be written, so leave it something to quote.
             logger.exception("Chat turn failed: %s", e)
-            self.error_occurred.emit(str(e))
+            self._emit(self.error_occurred, str(e))
 
-    def _wrap_describe_fn(self, describe_fn):
-        """Wrap describe_fn to emit vision_note signals."""
-        def wrapped(b64_data):
+    def _apply_client(self, client):
+        """Take the per-request settings from the client that answered."""
+        from ..config import get_config as _get_config
+        from ..llm.client import should_strip_thinking
+        self.api_style = client.api_style
+        # The truncation warning quotes this: the cap may come from a
+        # profile row, and cfg can change while the turn runs (#103).
+        self._response_max_tokens = client.max_tokens
+        self._strip_thinking = should_strip_thinking(
+            client.model, _get_config().strip_thinking_history)
+        self._optimize_caching = _get_config().optimize_prompt_caching
+        self._preserve_reasoning = _get_config().preserve_reasoning_history
+
+    def _request(self, client):
+        """Render the turn for ``client`` and open its stream (lazily)."""
+        from ..config import get_config as _get_config
+        from ..llm.client import should_strip_thinking
+        messages = self._work.get_messages_for_api(
+            api_style=client.api_style,
+            strip_thinking=should_strip_thinking(
+                client.model, _get_config().strip_thinking_history),
+            strip_images=self.strip_images,
+            describe_fn=self._memo_describe if self.describe_fn else None,
+            start_index=self.start_index)
+        tools = None
+        if self.registry is not None:
+            tools = (self.registry.to_anthropic_schema(self.filter_names)
+                     if client.api_style == "anthropic"
+                     else self.registry.to_openai_schema(self.filter_names))
+        return client.stream_with_tools(messages, system=self.system_prompt,
+                                        tools=tools)
+
+    def _memo_describe(self, data_url):
+        """describe_fn, once per image per turn, with one status note.
+
+        Every request re-renders the history, so without this an image
+        would be sent to the vision tool once per round and per profile.
+        A failure is remembered too: the next render gets the same
+        placeholder instead of a second slow MCP call.
+        """
+        import hashlib
+        key = hashlib.sha256(data_url.encode("utf-8")).hexdigest()
+        if key not in self._describe_cache:
             try:
-                result = describe_fn(b64_data)
-                self.vision_note.emit("Image auto-described by llm-vision-mcp")
-                return result
+                self._describe_cache[key] = (True, self.describe_fn(data_url))
+                self._emit(self.vision_note,
+                           "Image auto-described by llm-vision-mcp")
             except Exception as e:
-                self.vision_note.emit(f"Image description failed: {e}")
-                raise
-        return wrapped
+                self._describe_cache[key] = (False, str(e))
+                self._emit(self.vision_note, f"Image description failed: {e}")
+        ok, value = self._describe_cache[key]
+        if not ok:
+            raise RuntimeError(value)
+        return value
 
-    def _simple_stream(self, client):
+    def _simple_stream(self, walker):
         """Stream without tools — Plan mode, and any provider-less request.
 
         This reads the *event* stream, the one the tool loop uses. The
@@ -293,21 +380,27 @@ class _LLMWorker(QThread):
 
         ``tools=None`` keeps the request byte-identical: both body builders
         gate tools behind ``if tools:``, and ``_openai_body`` reaches its
-        ``reasoning_effort`` branch either way.
+        ``reasoning_effort`` branch either way. It opens through the
+        fallback walker, so a Plan turn can fail over too (#104).
         """
+        opened = walker.open(0, self._request)
+        if opened is None:
+            self._full_response += "\n\n_⏹ Stopped by user._"
+            self._emit(self.response_finished, self._full_response)
+            return
+        client, events = opened
+        self._apply_client(client)
         thinking_parts = []
-        for event in client.stream_with_tools(
-            self.messages, system=self.system_prompt, tools=None
-        ):
+        for event in events:
             if self.isInterruptionRequested():
                 break
             if event.type == "text_delta":
                 self._full_response += event.text
-                self.token_received.emit(event.text)
+                self._emit(self.token_received, event.text)
             elif event.type == "thinking_delta":
                 thinking_parts.append(event.text)
                 self._thinking_text += event.text
-                self.thinking_received.emit(event.text)
+                self._emit(self.thinking_received, event.text)
             elif event.type == "done":
                 break
         # A Plan reply is the turn that ends the run, so it never reaches
@@ -316,12 +409,10 @@ class _LLMWorker(QThread):
             "".join(thinking_parts), self._strip_thinking,
             self._optimize_caching, self.api_style, self._preserve_reasoning)
         self._response_truncated = client.response_truncated
-        self.response_finished.emit(self._full_response)
+        self._emit(self.response_finished, self._full_response)
 
-    def _tool_loop(self, client):
+    def _tool_loop(self, walker):
         """Agentic loop: stream -> execute tools -> feed results -> repeat."""
-        messages = list(self.messages)
-
         turn = 0
         while should_continue_loop(self._max_tool_turns, turn, self.isInterruptionRequested()):
             text_parts = []
@@ -329,22 +420,26 @@ class _LLMWorker(QThread):
             tool_calls = []
 
             # Stream with tools
-            for event in client.stream_with_tools(
-                messages, system=self.system_prompt, tools=self.tools
-            ):
+            opened = walker.open(turn, self._request)
+            if opened is None:
+                break          # Stop before any profile answered
+            client, events = opened
+            self._apply_client(client)
+
+            for event in events:
                 if self.isInterruptionRequested():
                     break
                 if event.type == "text_delta":
                     text_parts.append(event.text)
                     self._full_response += event.text
-                    self.token_received.emit(event.text)
+                    self._emit(self.token_received, event.text)
                 elif event.type == "thinking_delta":
                     thinking_parts.append(event.text)
                     self._thinking_text += event.text
-                    self.thinking_received.emit(event.text)
+                    self._emit(self.thinking_received, event.text)
                 elif event.type == "tool_call_start":
                     if event.tool_call:
-                        self.tool_call_started.emit(event.tool_call.name, event.tool_call.id)
+                        self._emit(self.tool_call_started, event.tool_call.name, event.tool_call.id)
                 elif event.type == "tool_call_end":
                     if event.tool_call:
                         tool_calls.append(event.tool_call)
@@ -367,17 +462,17 @@ class _LLMWorker(QThread):
                     self._preserve_reasoning)
             if outcome == "stopped":
                 self._full_response += "\n\n_⏹ Stopped by user._"
-                self.response_finished.emit(self._full_response)
+                self._emit(self.response_finished, self._full_response)
                 return
             if outcome == "truncated":
                 # Cut off at the output limit. Any tool calls in this turn came
                 # from a half-formed payload, so the loop halts here instead of
                 # acting on them; the UI shows the truncation warning (#52).
                 self._response_truncated = True
-                self.response_finished.emit(self._full_response)
+                self._emit(self.response_finished, self._full_response)
                 return
             if outcome == "done":
-                self.response_finished.emit(self._full_response)
+                self._emit(self.response_finished, self._full_response)
                 return
 
             # Store the assistant message with tool calls in the conversation
@@ -386,47 +481,20 @@ class _LLMWorker(QThread):
                 for tc in tool_calls
             ]
 
-            # Add assistant message to local messages for next turn
-            if self.api_style == "anthropic":
-                content_blocks = []
-                if turn_text:
-                    content_blocks.append({"type": "text", "text": turn_text})
-                for tc in tool_calls:
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.arguments,
-                    })
-                messages.append({"role": "assistant", "content": content_blocks})
-            else:
-                oai_tcs = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in tool_calls
-                ]
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": turn_text or None,
-                    "tool_calls": oai_tcs,
-                }
-                # Preserve reasoning_content unless the model wants it stripped
-                # (e.g. Gemma strips thinking; Kimi-K2.5 requires it)
-                if turn_thinking and not self._strip_thinking:
-                    assistant_msg["reasoning_content"] = turn_thinking
-                messages.append(assistant_msg)
+            # Record the round on the turn's working copy; the next request
+            # renders it for whichever client answers that one (#104). The
+            # echo follows the answering model's strip rule, never
+            # preserve_reasoning_history -- that one only decides what is
+            # stored at the end of the turn.
+            self._work.add_assistant_message(
+                turn_text, tool_calls=tc_dicts,
+                reasoning_content=turn_thinking if not self._strip_thinking else "")
 
             # Execute each tool call on the main thread
             # Exception: optimize_iteration runs on worker thread (long-running
             # LLM calls would freeze the UI if dispatched to main thread).
             # Its inner tool calls dispatch to main thread via QtMainThreadToolExecutor.
-            tool_result_messages = []
+            results = []
             for tc in tool_calls:
                 # Pre-tool-use hook
                 from ..hooks import fire_hook as _fire_hook
@@ -456,7 +524,7 @@ class _LLMWorker(QThread):
                     "elapsed": elapsed, "turn": turn,
                 })
 
-                self.tool_call_finished.emit(tc.name, tc.id, success, result_text)
+                self._emit(self.tool_call_finished, tc.name, tc.id, success, result_text)
 
                 # Post-tool-use hook
                 _fire_hook("post_tool_use", {
@@ -468,25 +536,9 @@ class _LLMWorker(QThread):
                     "turn": turn,
                 })
 
-                if self.api_style == "anthropic":
-                    tool_result_messages.append({
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tc.id,
-                                "content": result_text,
-                            }
-                        ],
-                    })
-                else:
-                    tool_result_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result_text,
-                    })
+                self._work.add_tool_result(tc.id, result_text)
+                results.append({"tool_call_id": tc.id, "content": result_text})
 
-            messages.extend(tool_result_messages)
 
             # Store tool call info so the parent can update the conversation
             self._tool_results.append({
@@ -497,10 +549,7 @@ class _LLMWorker(QThread):
                     turn_thinking, self._strip_thinking, self._optimize_caching,
                     self.api_style, self._preserve_reasoning),
                 "tool_calls": tc_dicts,
-                "results": [
-                    {"tool_call_id": tc.id, "content": r["content"] if self.api_style != "anthropic" else r["content"][0]["content"]}
-                    for tc, r in zip(tool_calls, tool_result_messages)
-                ],
+                "results": results,
             })
             turn += 1
 
@@ -508,15 +557,15 @@ class _LLMWorker(QThread):
         # bubble; this chat-level note is an intentional, clearer second signal.
         if self.isInterruptionRequested():
             self._full_response += "\n\n_⏹ Stopped by user._"
-            self.response_finished.emit(self._full_response)
+            self._emit(self.response_finished, self._full_response)
             return
 
         # If we reach here, we hit the max turns limit
         limit_msg = "\n\n[{}]".format(
             translate("ChatDockWidget", "Reached maximum tool call iterations"))
         self._full_response += limit_msg
-        self.token_received.emit(limit_msg)
-        self.response_finished.emit(self._full_response)
+        self._emit(self.token_received, limit_msg)
+        self._emit(self.response_finished, self._full_response)
 
     def _execute_tool_on_main_thread(self, tool_name: str, arguments: dict) -> dict:
         """Dispatch tool execution to the main thread and wait for the result.
@@ -526,7 +575,7 @@ class _LLMWorker(QThread):
         calls set_tool_result().
         """
         self._pending_result = None
-        self.tool_exec_requested.emit(tool_name, json.dumps(arguments))
+        self._emit(self.tool_exec_requested, tool_name, json.dumps(arguments))
 
         self._tool_result_ready.lock()
         elapsed = 0
@@ -849,6 +898,20 @@ class _AttachmentStrip(QtWidgets.QWidget):
 class ChatDockWidget(QDockWidget):
     """Main chat dock widget for FreeCAD AI."""
 
+    # Every worker signal and the slot it drives. _start_worker connects
+    # these; a detach disconnects the same list (#104).
+    _WORKER_SLOTS = (
+        ("token_received", "_on_token"),
+        ("thinking_received", "_on_thinking"),
+        ("response_finished", "_on_response_finished"),
+        ("error_occurred", "_on_error"),
+        ("tool_call_started", "_on_tool_call_started"),
+        ("tool_call_finished", "_on_tool_call_finished"),
+        ("tool_exec_requested", "_execute_tool_call"),
+        ("vision_note", "_on_vision_note"),
+        ("fallback_note", "_on_fallback_note"),
+    )
+
     def __init__(self, parent=None):
         super().__init__(translate("ChatDockWidget", "FreeCAD AI"), parent)
         self.setObjectName("FreeCADAIChatDock")
@@ -856,6 +919,12 @@ class ChatDockWidget(QDockWidget):
 
         self.conversation = Conversation()
         self._worker = None
+        self._detached_workers = []  # stopped but still running (#104)
+        self._last_worker = None     # Save Log after a detach (#104)
+        self._detach_pending = {}    # detach timer -> the worker it is for
+        self._turn_open = False      # a worker's turn is in flight
+        self._turn_notes = []        # this turn's fallback notes
+        self._turn_start = None      # first message index of this turn
         self._input_history = InputHistory()
         self._suppress_history_reset = False  # set True around programmatic
                                               # _set_input_text() to guard a
@@ -933,6 +1002,12 @@ class ChatDockWidget(QDockWidget):
 
     def _mark_shutdown(self):
         self._shutting_down = True
+        running = [self._worker, getattr(self, "_compaction_worker", None)]
+        for worker in running + list(self._detached_workers):
+            # Close and aboutToQuit both land here: keep each thread once.
+            if (worker is not None and worker.isRunning()
+                    and worker not in _KEEP_UNTIL_EXIT):
+                _keep_until_exit(worker)
         t = getattr(self, "_dock_poll_timer", None)
         if t is not None:
             try:
@@ -1421,6 +1496,7 @@ class ChatDockWidget(QDockWidget):
             # of sending. Input is usually empty here, so this must run before
             # the empty-text guard below.
             self._worker.requestInterruption()
+            self._schedule_detach(self._worker)
             return
 
         text = self.input_edit.toPlainText().strip()
@@ -1501,6 +1577,63 @@ class ChatDockWidget(QDockWidget):
             return
 
         self._continue_send()
+
+    def _schedule_detach(self, worker):
+        # A child timer dies with the dock under PySide2 and PySide6; the
+        # singleShot(ms, context, fn) overload is not in every binding.
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._on_detach_timeout)
+        self._detach_pending[timer] = worker
+        timer.start(_DETACH_AFTER_MS)
+
+    def _on_detach_timeout(self):
+        timer = self.sender()
+        worker = self._detach_pending.pop(timer, None)
+        if worker is not None:
+            self._detach_if_stuck(worker)
+        timer.deleteLater()
+
+    def _detach_if_stuck(self, worker):
+        """Stop was pressed and ``worker`` is still inside a request that
+        ignores interruption -- a connect or read that only returns at its
+        timeout, up to 300 s. Let it finish unheard and give the user the
+        input back now (#104)."""
+        if (worker is not self._worker or not self._turn_open
+                or not worker.isRunning()):
+            return
+        for signal, _ in self._WORKER_SLOTS:
+            try:
+                getattr(worker, signal).disconnect()
+            except (RuntimeError, TypeError):
+                pass       # nothing connected
+        worker.detach()
+        # A running QThread must never be destroyed: hold it until it ends,
+        # and not as the dock's child, which Qt deletes at quit.
+        worker.setParent(None)
+        self._detached_workers.append(worker)
+        worker.finished.connect(self._on_detached_finished)
+        if not worker.isRunning():   # ended between the check and the connect
+            self._release_detached(worker)
+        self._store_tool_results(worker._full_response)
+        self.conversation.save()
+        self._last_worker = worker   # Save Log still wants its trace
+        self._worker = None
+        self._turn_open = False
+        self._set_loading(False)
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml("</div></div>")
+        self._append_html(render_message(
+            "system", translate("ChatDockWidget", "⏹ Stopped")))
+
+    def _on_detached_finished(self):
+        self._release_detached(self.sender())
+
+    def _release_detached(self, worker):
+        if worker in self._detached_workers:
+            self._detached_workers.remove(worker)
+        worker.deleteLater()
 
     def _on_image_added(self, media_type: str, base64_data: str):
         """Handle image added via paste or drop."""
@@ -1978,8 +2111,7 @@ class ChatDockWidget(QDockWidget):
         # Ollama embedding/reranker accidentally selected as the main model
         # won't get tools sent to it.
         use_tools = cfg.enable_tools and mode == "act" and cfg.supports_tools
-        tools_schema = None
-        api_style = "openai"
+        filter_names = None
 
         if use_tools:
             # Connect MCP servers on first tool-enabled send
@@ -1987,7 +2119,6 @@ class ChatDockWidget(QDockWidget):
                 self._connect_mcp_servers(cfg)
 
             from ..tools.setup import create_default_registry
-            from ..llm.providers import get_api_style
 
             # Build extra tools for active optimization
             extra_tools = []
@@ -2026,11 +2157,9 @@ class ChatDockWidget(QDockWidget):
                 from ..mcp.manager import find_vision_fallback
                 self._vision_fallback_tool = find_vision_fallback(self._tool_registry)
                 self._refresh_image_controls()
-            api_style = get_api_style(cfg.provider.name)
 
             # Optional tool reranking: filter schemas down to the top-N
             # relevant tools (+ pinned) based on the latest user message.
-            filter_names = None
             if cfg.rerank_method in ("keyword", "llm"):
                 user_text = _extract_latest_user_text(self.conversation)
                 pairs = self._tool_registry.list_name_description_pairs()
@@ -2046,10 +2175,6 @@ class ChatDockWidget(QDockWidget):
                 except Exception:
                     pass
 
-            if api_style == "anthropic":
-                tools_schema = self._tool_registry.to_anthropic_schema(filter_names)
-            else:
-                tools_schema = self._tool_registry.to_openai_schema(filter_names)
             system_prompt = build_system_prompt(
                 mode=mode, tools_enabled=True,
                 override=cfg.system_prompt_override,
@@ -2062,7 +2187,6 @@ class ChatDockWidget(QDockWidget):
 
         # Build describe_fn for non-vision LLMs
         describe_fn = None
-        conversation_ref = None
         if not cfg.supports_vision:
             fallback = getattr(self, '_vision_fallback_tool', None)
             if fallback and self._tool_registry:
@@ -2078,16 +2202,11 @@ class ChatDockWidget(QDockWidget):
                         raise RuntimeError(result.error or "describe_image failed")
                     return describe
                 describe_fn = _make_describe(_reg, _tool)
-                conversation_ref = self.conversation
 
-        # Get messages for API
-        from ..llm.client import should_strip_thinking
-        strip = should_strip_thinking(
-            cfg.provider.model, cfg.strip_thinking_history)
         # When the model has no vision and no describe_image fallback is
         # available, drop history image blocks to a placeholder so they aren't
         # sent raw to a provider that would reject them (issue #30). When a
-        # describe_fn exists, the worker rebuilds messages with descriptions.
+        # describe_fn exists, the worker renders descriptions per request.
         strip_images = not cfg.supports_vision and describe_fn is None
         # Prompt caching (#47): the document state was deliberately left out
         # of the system prompt so the prefix stays byte-identical between
@@ -2095,7 +2214,7 @@ class ChatDockWidget(QDockWidget):
         # delivered at the tail where changing it invalidates nothing ahead
         # of it -- and so every earlier turn renders the bytes it was
         # already sent with. Recording rather than grafting also means the
-        # worker's vision-fallback re-render (see _LLMWorker.run) keeps it.
+        # worker's vision-fallback re-render (see _LLMWorker._request) keeps it.
         if cfg.optimize_prompt_caching:
             from ..core.system_prompt import build_document_context_block
             self.conversation.attach_document_context(
@@ -2103,10 +2222,26 @@ class ChatDockWidget(QDockWidget):
         else:
             self.conversation.clear_document_context()
 
-        messages = self.conversation.get_messages_for_api(
-            api_style=api_style, strip_images=strip_images, strip_thinking=strip)
+        # The window is fixed for the whole turn so later tool rounds don't
+        # drop older messages from under the prompt cache (#104, #47).
+        start_index = self.conversation.window_start()
+        self._start_worker(
+            self.conversation, system_prompt,
+            registry=self._tool_registry, filter_names=filter_names,
+            describe_fn=describe_fn, strip_images=strip_images,
+            start_index=start_index,
+            needs_vision=self._needs_vision(
+                cfg, self.conversation, start_index))
 
-        # Start streaming
+    @staticmethod
+    def _needs_vision(cfg, conversation, start_index) -> bool:
+        """Raw images go out only when the chat profile has vision; then
+        a fallback without vision must be skipped (#104)."""
+        return bool(cfg.supports_vision
+                    and conversation.has_images(start_index))
+
+    def _start_worker(self, conversation, system_prompt, **worker_kwargs):
+        """Open the AI bubble and start a worker on ``conversation``."""
         self._set_loading(True)
         self._streaming_html = ""
         self._append_html(
@@ -2115,25 +2250,29 @@ class ChatDockWidget(QDockWidget):
             '<div style="font-weight: bold; color: #2e7d32; margin-bottom: 4px;">AI</div>'
             '<div style="white-space: pre-wrap;">'
         )
-
         self._in_thinking = False
         self._tool_results_stored = False
         self._summary_rendered = False
-        self._worker = _LLMWorker(
-            messages, system_prompt,
-            tools=tools_schema, registry=self._tool_registry,
-            api_style=api_style, conversation=conversation_ref,
-            describe_fn=describe_fn, parent=self,
-        )
-        self._worker.token_received.connect(self._on_token)
-        self._worker.thinking_received.connect(self._on_thinking)
-        self._worker.response_finished.connect(self._on_response_finished)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.tool_call_started.connect(self._on_tool_call_started)
-        self._worker.tool_call_finished.connect(self._on_tool_call_finished)
-        self._worker.tool_exec_requested.connect(self._execute_tool_call)
-        self._worker.vision_note.connect(self._on_vision_note)
+        self._turn_notes = []
+        self._turn_start = len(conversation.messages)
+        self._turn_open = True
+        self._worker = _LLMWorker(conversation, system_prompt, parent=self,
+                                  **worker_kwargs)
+        # Bound dock methods only: a QObject receiver gets its slots queued
+        # onto the GUI thread under PySide2 and PySide6 alike. Each slot
+        # checks _from_current_worker() itself.
+        for signal, slot in self._WORKER_SLOTS:
+            getattr(self._worker, signal).connect(getattr(self, slot))
         self._worker.start()
+
+    def _from_current_worker(self) -> bool:
+        """Whether the signal being handled comes from the current worker.
+
+        Qt still delivers signals queued before a disconnect(), so a
+        detached or replaced worker's last signals must change nothing
+        (#104). A direct call (no sender) is always handled."""
+        sender = self.sender()
+        return sender is None or sender is self._worker
 
     def _save_session_log(self):
         """Save the current session log as JSON for debugging."""
@@ -2160,9 +2299,13 @@ class ChatDockWidget(QDockWidget):
                 entry["tool_call_id"] = msg["tool_call_id"]
             log_data["messages"].append(entry)
 
-        # Also include the last worker's tool results if available
-        if self._worker and hasattr(self._worker, "_tool_results") and self._worker._tool_results:
-            log_data["tool_trace"] = self._worker._tool_results
+        # Also include the last worker's tool results if available; after
+        # a Stop detached it, the detached worker still has them (#104).
+        worker = self._worker or getattr(self, "_last_worker", None)
+        if worker and hasattr(worker, "_tool_results") and worker._tool_results:
+            log_data["tool_trace"] = worker._tool_results
+        if worker and getattr(worker, "fallback_attempts", None):
+            log_data["fallback_attempts"] = worker.fallback_attempts
 
         try:
             with open(filepath, "w") as f:
@@ -2226,6 +2369,8 @@ class ChatDockWidget(QDockWidget):
     @Slot(str)
     def _on_thinking(self, chunk):
         """Handle a thinking/reasoning delta — render dimmed."""
+        if not self._from_current_worker():
+            return
         import html as html_mod
         if not self._in_thinking:
             self._in_thinking = True
@@ -2253,6 +2398,8 @@ class ChatDockWidget(QDockWidget):
     @Slot(str)
     def _on_token(self, chunk):
         """Handle a streamed token — append to the display."""
+        if not self._from_current_worker():
+            return
         import html as html_mod
 
         # Close thinking block if transitioning from thinking to regular content
@@ -2275,49 +2422,58 @@ class ChatDockWidget(QDockWidget):
 
     def _store_tool_results(self, full_response=""):
         """Store tool results from worker into conversation. Idempotent — skips if already stored."""
-        final_reasoning = getattr(self._worker, "_final_reasoning", "")
-        if not (self._worker and self._worker._tool_results):
-            if full_response:
-                self.conversation.add_assistant_message(
-                    full_response, reasoning_content=final_reasoning)
-            return
-
-        # Guard against double-storage (e.g., if both response_finished and error fire)
-        if getattr(self, '_tool_results_stored', False):
-            return
-        self._tool_results_stored = True
-
         try:
-            for turn_info in self._worker._tool_results:
-                tc_dicts = turn_info["tool_calls"]
-                self.conversation.add_assistant_message(
-                    turn_info["assistant_text"], tool_calls=tc_dicts,
-                    reasoning_content=turn_info.get("reasoning"),
-                )
-                for r in turn_info["results"]:
-                    self.conversation.add_tool_result(r["tool_call_id"], r["content"])
-            # Store the final text-only response
-            # Extract just the final part (after last tool round)
-            last_tool_end = sum(
-                len(t["assistant_text"]) for t in self._worker._tool_results
-            )
-            final_text = full_response[last_tool_end:] if last_tool_end < len(full_response) else full_response
-            if final_text.strip():
-                self.conversation.add_assistant_message(
-                    final_text, reasoning_content=final_reasoning)
-        except Exception as e:
+            final_reasoning = getattr(self._worker, "_final_reasoning", "")
+            if not (self._worker and self._worker._tool_results):
+                if full_response:
+                    self.conversation.add_assistant_message(
+                        full_response, reasoning_content=final_reasoning)
+                return
+
+            # Guard against double-storage (e.g., if both response_finished and error fire)
+            if getattr(self, '_tool_results_stored', False):
+                return
+            self._tool_results_stored = True
+
             try:
-                import FreeCAD
-                FreeCAD.Console.PrintError(f"_store_tool_results error: {e}\n")
-            except Exception:
-                pass
-            # Fallback: store at least the full response text
-            if full_response.strip():
-                self.conversation.add_assistant_message(full_response)
+                for turn_info in self._worker._tool_results:
+                    tc_dicts = turn_info["tool_calls"]
+                    self.conversation.add_assistant_message(
+                        turn_info["assistant_text"], tool_calls=tc_dicts,
+                        reasoning_content=turn_info.get("reasoning"),
+                    )
+                    for r in turn_info["results"]:
+                        self.conversation.add_tool_result(r["tool_call_id"], r["content"])
+                # Store the final text-only response
+                # Extract just the final part (after last tool round)
+                last_tool_end = sum(
+                    len(t["assistant_text"]) for t in self._worker._tool_results
+                )
+                final_text = full_response[last_tool_end:] if last_tool_end < len(full_response) else full_response
+                if final_text.strip():
+                    self.conversation.add_assistant_message(
+                        final_text, reasoning_content=final_reasoning)
+            except Exception as e:
+                try:
+                    import FreeCAD
+                    FreeCAD.Console.PrintError(f"_store_tool_results error: {e}\n")
+                except Exception:
+                    pass
+                # Fallback: store at least the full response text
+                if full_response.strip():
+                    self.conversation.add_assistant_message(full_response)
+        finally:
+            # Every exit, including the double-storage guard: idempotent.
+            _attach_turn_notes(self.conversation.messages,
+                               getattr(self, "_turn_start", None),
+                               getattr(self, "_turn_notes", None))
 
     @Slot(str)
     def _on_response_finished(self, full_response):
         """Handle completion of LLM response."""
+        if not self._from_current_worker():
+            return
+        self._turn_open = False
         self._set_loading(False)
 
         # Close the streaming div
@@ -2461,6 +2617,9 @@ class ChatDockWidget(QDockWidget):
         Preserves any tool results from earlier turns, then appends the error
         without re-rendering (to keep the streaming HTML intact).
         """
+        if not self._from_current_worker():
+            return
+        self._turn_open = False
         self._set_loading(False)
 
         # Close the streaming div
@@ -2495,6 +2654,9 @@ class ChatDockWidget(QDockWidget):
                 translate("ChatDockWidget",
                           "All operations completed successfully:") + "\n\n" + summary
             )
+            _attach_turn_notes(self.conversation.messages,
+                               getattr(self, "_turn_start", None),
+                               getattr(self, "_turn_notes", None))
             self.conversation.save()
         else:
             # No tool results — show the raw error
@@ -2505,25 +2667,42 @@ class ChatDockWidget(QDockWidget):
     @Slot(str, str)
     def _on_tool_call_started(self, tool_name, call_id):
         """Render tool call start in the chat."""
+        if not self._from_current_worker():
+            return
         self._append_html(render_tool_call(tool_name, call_id, started=True))
 
     @Slot(str, str, bool, str)
     def _on_tool_call_finished(self, tool_name, call_id, success, output):
         """Render tool call result in the chat."""
+        if not self._from_current_worker():
+            return
         self._append_html(render_tool_call(
             tool_name, call_id, started=False, success=success, output=output
         ))
 
     def _on_vision_note(self, message: str):
         """Show a subtle note when images are auto-described."""
+        if not self._from_current_worker():
+            return
         self._append_html(
             f'<div style="color: #888; font-size: 9pt; margin: 2px 12px;">'
             f'{message}</div>'
         )
 
+    def _on_fallback_note(self, text: str):
+        """Show which profile answered after a failover (#104). Display
+        only: kept on the turn's reply for the re-render, never sent to a
+        model."""
+        if not self._from_current_worker():
+            return
+        self._turn_notes.append(text)
+        self._append_html(_render_note(text))
+
     @Slot(str, str)
     def _execute_tool_call(self, tool_name, arguments_json):
         """Execute a tool call on the main thread. Connected to worker's tool_exec_requested signal."""
+        if not self._from_current_worker():
+            return
         if not self._tool_registry:
             result = {"success": False, "output": "", "error": "No tool registry"}
         else:
@@ -2610,14 +2789,11 @@ class ChatDockWidget(QDockWidget):
         self._append_html(render_message("system", error_msg))
 
         from ..core.system_prompt import build_system_prompt
-        from ..llm.client import should_strip_thinking
         mode = "plan" if self.mode_combo.currentIndex() == 0 else "act"
         cfg = get_config()
         system_prompt = build_system_prompt(
             mode=mode,
             include_document_context=not cfg.optimize_prompt_caching)
-        strip = should_strip_thinking(
-            cfg.provider.model, cfg.strip_thinking_history)
         # Same tail delivery as the main send path (#47). The turn being
         # re-sent is the [System] error message added just above.
         if cfg.optimize_prompt_caching:
@@ -2628,25 +2804,16 @@ class ChatDockWidget(QDockWidget):
             self.conversation.clear_document_context()
 
         # This retry attached a viewport snapshot above; drop history images
-        # for non-vision models so they aren't sent raw (issue #30).
-        messages = self.conversation.get_messages_for_api(
-            strip_images=not cfg.supports_vision, strip_thinking=strip)
-
-        self._set_loading(True)
-        self._streaming_html = ""
-        self._append_html(
-            '<div style="margin: 8px 0; padding: 8px 12px; '
-            'background-color: #f5f5f5; border-radius: 6px;">'
-            '<div style="font-weight: bold; color: #2e7d32; margin-bottom: 4px;">AI</div>'
-            '<div style="white-space: pre-wrap;">'
-        )
-
-        self._tool_results_stored = False
-        self._worker = _LLMWorker(messages, system_prompt, parent=self)
-        self._worker.token_received.connect(self._on_token)
-        self._worker.response_finished.connect(self._on_response_finished)
-        self._worker.error_occurred.connect(self._on_error)
-        self._worker.start()
+        # for non-vision models so they aren't sent raw (issue #30). The
+        # worker renders the turn for whichever profile answers, like the
+        # main send path -- this used to render OpenAI style from
+        # cfg.provider.model whatever the vendor (#104).
+        start_index = self.conversation.window_start()
+        self._start_worker(
+            self.conversation, system_prompt,
+            strip_images=not cfg.supports_vision, start_index=start_index,
+            needs_vision=self._needs_vision(
+                cfg, self.conversation, start_index))
 
     def execute_code_from_plan(self, code):
         """Execute a code block from Plan mode (called from Execute button)."""
@@ -2749,6 +2916,8 @@ class ChatDockWidget(QDockWidget):
             mode = "plan" if self.mode_combo.currentIndex() == 0 else "act"
 
             for msg in self.conversation.messages:
+                for note in msg.get("notes", ()):
+                    html_parts.append(_render_note(note))
                 if msg["role"] == "tool_result":
                     # Tool results are rendered inline via tool_call_finished signals
                     continue

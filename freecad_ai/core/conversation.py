@@ -171,11 +171,48 @@ class Conversation:
             out.append(copy)
         return out
 
+    def window_start(self, max_chars: int = 100000) -> int:
+        """Index of the oldest message the max_chars window keeps.
+
+        Walks backwards from the newest message and never splits a
+        tool_call/tool_result pair.
+        """
+        total_chars = 0
+        start = len(self.messages)
+        i = len(self.messages) - 1
+        while i >= 0:
+            msg = self.messages[i]
+            if msg["role"] == "tool_result":
+                j = i - 1
+                while j >= 0 and self.messages[j]["role"] == "tool_result":
+                    j -= 1
+                if j >= 0 and self.messages[j]["role"] == "assistant":
+                    j -= 1
+                group_chars = sum(self._content_chars(m.get("content", ""))
+                                  for m in self.messages[j + 1:i + 1])
+                if total_chars + group_chars > max_chars and start < len(self.messages):
+                    break
+                total_chars += group_chars
+                start = j + 1
+                i = j
+                continue
+            # The snapshot is billed like any other text, so it counts
+            # against the budget even though it lives beside the content.
+            msg_chars = (self._content_chars(msg.get("content", ""))
+                         + len(msg.get("doc_context", "")))
+            if total_chars + msg_chars > max_chars and start < len(self.messages):
+                break
+            total_chars += msg_chars
+            start = i
+            i -= 1
+        return start
+
     def get_messages_for_api(self, max_chars: int = 100000,
                              api_style: str = "openai",
                              describe_fn=None,
                              strip_images: bool = False,
-                             strip_thinking: bool = False) -> list[dict]:
+                             strip_thinking: bool = False,
+                             start_index: int | None = None) -> list[dict]:
         """Get messages formatted for the LLM API.
 
         Truncates older messages if the total content exceeds max_chars.
@@ -192,51 +229,17 @@ class Conversation:
             strip_thinking: If True, remove reasoning_content from assistant
                 messages in the history.  Required by models like Gemma that
                 reject thinking content in multi-turn conversations.
+            start_index: The first message to keep, from window_start().
+                A turn computes it once so later rounds of the tool loop
+                don't drop older messages from under the prompt cache
+                (#104, #47). None = compute it now from max_chars.
         """
         if not self.messages:
             return []
 
-        # Walk backwards, collecting messages while respecting max_chars
-        # and never splitting tool_call/tool_result pairs
-        result = []
-        total_chars = 0
-
-        i = len(self.messages) - 1
-        while i >= 0:
-            msg = self.messages[i]
-            content = msg.get("content", "")
-            # The snapshot is billed like any other text, so it counts
-            # against the budget even though it lives beside the content.
-            msg_chars = (self._content_chars(content)
-                         + len(msg.get("doc_context", "")))
-
-            # If this is a tool_result, we must also include the preceding assistant
-            # message that contains the tool_call. Walk back to find the pair.
-            if msg["role"] == "tool_result":
-                # Collect all consecutive tool_results
-                tool_group = [msg]
-                j = i - 1
-                while j >= 0 and self.messages[j]["role"] == "tool_result":
-                    tool_group.insert(0, self.messages[j])
-                    j -= 1
-                # The message before should be the assistant with tool_calls
-                if j >= 0 and self.messages[j]["role"] == "assistant":
-                    tool_group.insert(0, self.messages[j])
-                    j -= 1
-
-                group_chars = sum(self._content_chars(m.get("content", "")) for m in tool_group)
-                if total_chars + group_chars > max_chars and result:
-                    break
-                result = tool_group + result
-                total_chars += group_chars
-                i = j
-                continue
-
-            if total_chars + msg_chars > max_chars and result:
-                break
-            result.insert(0, msg)
-            total_chars += msg_chars
-            i -= 1
+        if start_index is None:
+            start_index = self.window_start(max_chars)
+        result = list(self.messages[start_index:])
 
         # Ensure the first message is a user message (API requirement)
         while result and result[0]["role"] not in ("user",):
@@ -258,6 +261,24 @@ class Conversation:
             return self._to_anthropic_format(result)
         else:
             return self._to_openai_format(result, strip_thinking=strip_thinking)
+
+    def fork_for_turn(self) -> "Conversation":
+        """A working copy for one turn's tool rounds (#104).
+
+        The worker records each round here and renders every request from
+        it; the real conversation is written once, at the end of the turn,
+        by the widget. Message dicts are shared, never mutated.
+        """
+        return Conversation(messages=list(self.messages),
+                            conversation_id=self.conversation_id,
+                            created_at=self.created_at, model=self.model)
+
+    def has_images(self, start_index: int = 0) -> bool:
+        """Whether any message from start_index on carries an image block."""
+        return any(
+            isinstance(msg.get("content"), list)
+            and any(b.get("type") == "image" for b in msg["content"])
+            for msg in self.messages[start_index:])
 
     def _to_openai_format(self, messages: list[dict],
                           strip_thinking: bool = False) -> list[dict]:

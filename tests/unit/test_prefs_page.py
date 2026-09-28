@@ -279,3 +279,12 @@ def test_importing_the_module_builds_no_qt_widgets():
     out = subprocess.run([sys.executable, "-c", code], cwd=PROJECT_ROOT,
                          env=env, capture_output=True, text=True)
     assert out.stdout.strip() == "False", out.stderr
+
+
+def test_preferences_saves_the_fallback_list(pages):
+    section = pages["FreeCADAIProviderPrefs"].page.section
+    section.fallback_picker.setCurrentIndex(
+        section.fallback_picker.findData("local"))
+    section.fallback_add_btn.click()
+    _ok(pages)
+    assert config_mod.load_config().fallback_profiles == ["local"]

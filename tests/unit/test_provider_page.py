@@ -257,3 +257,14 @@ class TestProbeThreadsAreFreed:
         self._run_to_completion(qapp, page, "_rerank_test_thread")
         assert page._rerank_test_btn.isEnabled()
         assert "down" in page._rerank_test_status.text()
+
+
+def test_the_dialog_page_saves_the_fallback_list(page):
+    page.load(_cfg())
+    section = page.section
+    section.fallback_picker.setCurrentIndex(
+        section.fallback_picker.findData("local"))
+    section.fallback_add_btn.click()
+    target = _cfg()
+    page.apply_to(target)
+    assert target.fallback_profiles == ["local"]
